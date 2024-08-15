@@ -1,0 +1,7 @@
+original_wd <- getwd()
+setwd("scripts")
+source("text_config.R", echo = TRUE)
+source("data.R", echo = TRUE)
+source("text_preprocess.R", echo = TRUE)
+source("text_analysis.R", echo = TRUE)
+setwd(original_wd)

@@ -1,0 +1,458 @@
+---
+title: "Model 4"
+author: "Michelle Papadakis"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  pdf_document:
+    latex_engine: xelatex
+    toc: false
+    toc_depth: 2
+    keep_tex: true
+---
+
+
+# Clean the environment
+```{r}
+#Cleaning the environment
+rm(list=ls())
+```
+
+# Load libraries
+```{r}
+#Libraries
+pacman::p_load(tidyverse,dplyr, readr, downloader, psych, Metrics, ggplot2, survey, reshape2, factoextra, FactoMineR, car, randomForest, xgboost, SuperLearner, glmnet, SHAPforxgboost, caret) 
+```
+
+# Data fetching
+```{r, include=FALSE}
+
+#Download and unzip the file
+download_and_unzip <- function(url, zip_file, unzip_dir) {
+  download.file(url, zip_file, mode = "wb")
+  unzip(zip_file, exdir = unzip_dir)
+}
+
+#Read and select columns from a CSV file
+read_and_select <- function(file_path, columns) {
+  read_csv(file_path) %>%
+    select(all_of(columns))
+}
+
+# Principal function
+main <- function() {
+  # Set the URL, zip file, and unzip directory
+  url <- "https://www.inegi.org.mx/contenidos/programas/enasic/2022/microdatos/enasic_2022_bd_csv.zip"
+  zip_file <- tempfile()
+  unzip_dir <- tempdir()
+  
+  # Download and unzip the file
+  download_and_unzip(url, zip_file, unzip_dir)
+  
+  # Select variables of interest 
+  tpob_cui_columns <- c("FAC_CUI", "LLAVEMOD","PB_CDISC", "PB_C0005", "PB_C0617", "PB_C60MA", "PB_CETEM", "P6_29_1", "P6_29_2", "P6_29_3",  "P6_29_5", "P6_29_6", "P6_29_7", "P6_29_8", "P6_30_1", "P6_30_2", "P6_30_3", "P6_30_4", "P6_30_5", "P6_30_6", "P6_30_7", "P6_10_1", "P6_10_2", "P6_10_3", "P6_10_5", "P6_10_6", "P6_10_7", "P6_10_8", "P6_11_1", "P6_11_2", "P6_11_3", "P6_11_4", "P6_11_5", "P6_11_6", "P6_11_7", "P7_1", "P7_2", "P7_6", "P7_8", "P7_10", "P7_12_2", "P7_12_4", "P7_12_6", "P7_12_8")
+  
+  # Read and select the data
+  tpob_cui_selected <- read_and_select(file.path(unzip_dir, "TPOB_CUI.csv"), tpob_cui_columns)
+  
+  # Filter the data to keep only observations of individuals who provide at least one type of care
+  data_filtered <- tpob_cui_selected %>%
+    filter(PB_CDISC == 1 | PB_C0005 == 1 | PB_C0617 == 1 | PB_C60MA == 1 | PB_CETEM == 1)
+  
+  return(data_filtered)
+}
+
+# Call the main function
+df <- main()
+
+
+
+#Load "final_data_m1.csv" file to train the model with the new data
+df_model3 <- read_csv("final_data_m3_scaled.csv")
+
+```
+
+
+NOTES FOR FEATURE ENGINEERING
+
+
+# Social affectation
+# Variables (7):
+ P6_29_1 | P6_10_1 = "cuidar le ha afectado a usted en su relación con los integrantes de su hogar" (1 en cualquiera de las dos variables = 1)
+ P6_29_2 | P6_10_2 = "cuidar e ha afectado a usted en su relación con los demás miembros de su familia (ajenos a su hogar)? (1 en cualquiera de las dos variables = 1)
+ P6_29_3 | P6_10_3 = "cuidar le ha afectado a usted en su convivencia con amistades?" (1 en cualquiera de las dos variables = 1)
+ P6_29_5 | P6_10_5 = "cuidar le ha afectado a usted en su tiempo libre?" (1 en cualquiera de las dos variables = 1)
+ P6_29_6 | P6_10_6 = "cuidar le ha afectado a usted en la convivencia con su pareja?" (1 en cualquiera de las dos variables = 1)
+ P6_29_7 | P6_10_7 = "cuidar le ha afectado a usted en su convivencia con compañeras(os) de trabajo?" (1 en cualquiera de las dos variables = 1)
+ P6_29_8 | P6_10_8 = "le ha afectado a usted en encontrar una pareja afectiva o casarse?" (1 en cualquiera de las dos variables = 1)
+
+
+
+#Health affectation
+#Variables(7):
+ P6_30_1 | P6_11_1 = "Por el cuidado que usted otorga se ha deteriorado su salud física" (1 en cualquiera de las dos variables = 1)
+ P6_30_2 | P6_11_2 = "Por el cuidado que usted otorga ha recibido terapia para tratar ansiedad, angustia, nervios o depresión?" (1 en cualquiera de las dos variables = 1)
+ P6_30_3 | P6_11_3 = "Por el cuidado que usted otorga se siente cansada(o)" (1 en cualquiera de las dos variables = 1)
+ P6_30_4 | P6_11_4 = "Por el cuidado que usted otorga se siente deprimida(o)" (1 en cualquiera de las dos variables = 1)
+ P6_30_5 | P6_11_5 = "Por el cuidado que usted otorga se siente irritada(o?" (1 en cualquiera de las dos variables = 1)
+ P6_30_6 | P6_11_6 = "Por el cuidado que usted otorga ha disminuido su tiempo de sueño?" (1 en cualquiera de las dos variables = 1)
+ P6_30_7 | P6_11_7 = "Por el cuidado que usted otorga ha desarrollado alguna enfermedad o se le ha agravado a consecuencia de ello?" (1 en cualquiera de las dos variables = 1)
+
+
+
+# Culture affectation 
+# Variables (11):
+ if P7_1 = 1 then "el cuidado de los hijos es solo responsabilidad de la mamá" = 1
+ if P7_2 = 2 then "no cree que se debe llevar a las niñas y niños chiquitos a educación inicial, guardería o estancia infantil" = 1
+ if P7_6 = 1 then "cree que cuando los padres son adultos la responsabilidad de cuidarlos la tienen las hijas" = 1 
+ if P7_7 = 4 then "cree que los cuiados a los adultos mayores deben brindarlos los miembros de la familia" = 1
+ if P7_8 = 4 then "no cree que se deba llevar a los adultos mayores a un asilo" = 1
+ if P7_10 = 4 then "no le gustaría que le llevaran a un asilo" = 1
+ if P7_12_1 = 1 then "cuidar es solo su responsabilidad" = 1
+ if P7_12_2 = 1 then "cuidar es solo la responsabilidad de las mujeres" = 1
+ if P7_12_4 = 2 then "cuidar no es solo responsabilidad de hombres" = 1 #REVISAR
+ if P7_12_6 = 2 then " El cuidado de las y los integrantes del hogar NO es responsabilidad tanto de mujeres como de hombres" = 1 #REVISAR
+ if P7_12_8 = 1 then " si la madre trabaja, los hijos sufren" = 1
+
+
+
+#Feature engineering
+
+```{r}
+#################################################################################
+
+# Function to set the affectation
+set_affectation <- function(col1, col2) {
+  ifelse(!is.na(col1) & col1 == 1 | !is.na(col2) & col2 == 1, 1, 
+         ifelse(is.na(col1) & is.na(col2), NA, 0))
+}
+
+#Social affectation
+#Variables (7):
+
+df$social_home <- set_affectation(df$P6_29_1, df$P6_10_1)
+df$social_family <- set_affectation(df$P6_29_2, df$P6_10_2)
+df$social_friends <- set_affectation(df$P6_29_3, df$P6_10_3)
+df$social_freetime <- set_affectation(df$P6_29_5, df$P6_10_5)
+df$social_partner <- set_affectation(df$P6_29_6, df$P6_10_6)
+df$social_workfriends <- set_affectation(df$P6_29_7, df$P6_10_7)
+df$social_findingpartner <- set_affectation(df$P6_29_8, df$P6_10_8)
+
+
+#Health affectation
+#Variables(7):
+
+df$health_physical <- set_affectation(df$P6_30_1, df$P6_11_1)
+df$health_anxiety <- set_affectation(df$P6_30_2, df$P6_11_2)
+df$health_tiredness <- set_affectation(df$P6_30_3, df$P6_11_3)
+df$health_depression <- set_affectation(df$P6_30_4, df$P6_11_4)
+df$health_irritability <- set_affectation(df$P6_30_5, df$P6_11_5)
+df$health_sleep <- set_affectation(df$P6_30_6, df$P6_11_6)
+df$health_disease <- set_affectation(df$P6_30_7, df$P6_11_7)
+
+
+#Culture affectation 
+#Variables (11):
+df$cul_mothersrespon <- ifelse(df$P7_1 == 1, 1, 0)
+df$cul_nocarecenters <- ifelse(df$P7_2 == 2, 1, 0)
+df$cul_daughterespon <- ifelse(df$P7_6 == 1, 1, 0)
+df$cul_nonursinghome <- ifelse(df$P7_8 == 4, 1, 0)
+df$cul_nonursinghomeforself <- ifelse(df$P7_10 == 4, 1, 0)
+#df$culture_soleyrespon <- ifelse(df$P7_12_1 == 1, 1, 0)
+df$cul_womresponcare <- ifelse(df$P7_12_2 == 1, 1, 0)
+df$cul_notmenrespon <- ifelse(df$P7_12_4 == 2, 1, 0)
+df$cul_notequalrespon <- ifelse(df$P7_12_6 == 2, 1, 0)
+df$cul_workwom_childsuffer <- ifelse(df$P7_12_8 == 1, 1, 0)
+
+
+```
+
+# PCA
+
+```{r}
+
+# Var selection
+social <-df[startsWith(names(df), "social")]
+health <-df[startsWith(names(df), "health")]
+culture <-df[startsWith(names(df), "cul")]
+
+
+# Retra-choric correlation matrix
+social_tetra_corr <- tetrachoric(social)$rho
+health_tetra_corr <- tetrachoric(health)$rho
+culture_tetra_corr <- tetrachoric(culture)$rho
+
+# PCA 
+social_pca_result <- principal(social_tetra_corr, nfactors = ncol(social), rotate = "none")
+health_pca_result <- principal(health_tetra_corr, nfactors = ncol(health), rotate = "none")
+culture_pca_result <- principal(culture_tetra_corr, nfactors = ncol(culture), rotate = "none")
+
+#Loadings
+social_loadings <- social_pca_result$loadings
+health_loadings <- health_pca_result$loadings
+culture_loadings <- culture_pca_result$loadings
+
+#Scores
+social_scores <- as.matrix(social) %*% social_loadings
+health_scores <- as.matrix(health) %*% health_loadings
+culture_scores <- as.matrix(culture) %*% culture_loadings
+
+
+# 1st principal component scores (the maximum variance)
+social_pc1_score <- social_scores[, 1, drop = FALSE]
+health_pc1_score <- health_scores[, 1, drop = FALSE]
+culture_pc1_score <- culture_scores[, 1, drop = FALSE]
+
+#Add the scores to the original data frame
+df$social_pc1_score <- social_pc1_score
+df$health_pc1_score <- health_pc1_score
+df$culture_pc1_score <- culture_pc1_score
+
+
+
+
+```
+
+#PCA Graphs
+
+```{r}
+
+# Graphical representation of the PCA results
+#1. Social domain
+pca_social <- PCA(social_tetra_corr, graph = FALSE)
+png("pca_social.png", width = 800, height = 600)
+fviz_pca_var(pca_social, col.var = "contrib", repel = TRUE, labelsize = 6) +
+  labs(title = "PCA - Social", x = "Dim1", y = "Dim2") +
+theme(plot.title = element_text(hjust = 0.5, size = 20),
+        axis.title.x = element_text(size = 20),
+        axis.title.y = element_text(size = 20),
+        axis.text = element_text(size = 16),
+        legend.title = element_text(size = 20),
+        legend.text = element_text(size = 20))
+dev.off()
+
+#2. Health domain
+pca_health <- PCA(health_tetra_corr, graph = FALSE)
+png("pca_health.png", width = 800, height = 600)
+fviz_pca_var(pca_health, col.var = "contrib", repel = TRUE, labelsize = 6) +
+  labs (title = "PCA - Health", x = "Dim1", y = "Dim2")+
+theme(plot.title = element_text(hjust = 0.5, size = 20),
+        axis.title.x = element_text(size = 20),
+        axis.title.y = element_text(size = 20),
+        axis.text = element_text(size = 16),
+        legend.title = element_text(size = 20),
+        legend.text = element_text(size = 20))
+dev.off()
+
+#3. Culture domain
+pca_culture <- PCA(culture_tetra_corr, graph = FALSE)
+png("pca_culture.png", width = 800, height = 600)
+fviz_pca_var(pca_culture, col.var = "contrib", repel = TRUE, labelsize = 6) +
+  labs( title = "PCA - Culture", x = "Dim1", y = "Dim2") +
+theme(plot.title = element_text(hjust = 0.5, size = 20),
+        axis.title.x = element_text(size = 20),
+        axis.title.y = element_text(size = 20),
+        axis.text = element_text(size = 16),
+        legend.title = element_text(size = 20),
+        legend.text = element_text(size = 20))
+dev.off()
+
+
+
+
+#Graphical representation of the tetra-choric correlation matrix
+visualize_tetrachoric <- function(data, domain_name) {
+  tetra_corr <- tetrachoric(data)$rho
+  
+  #Make it long
+  corr_melt <- melt(tetra_corr)
+  
+  #Heatmap
+  ggplot(data = corr_melt, aes(x = Var1, y = Var2, fill = value)) +
+    geom_tile() +
+    scale_fill_gradient2(low = "#415a77", high = "#9a031e", mid = "white", 
+                         midpoint = 0, limit = c(-1,1), space = "Lab", 
+                         name="Correlation") +
+    theme_minimal() +
+    coord_fixed() +
+    labs(title = paste("Tetra-choric correlation", domain_name), 
+         x = "", y = "") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 1, size = 14, hjust = 1),
+          axis.text.y = element_text(size = 14))
+}
+
+visualize_tetrachoric <- function(data, domain_name) {
+  tetra_corr <- tetrachoric(data)$rho
+  
+  #Make it long
+  corr_melt <- melt(tetra_corr)
+  
+  #Heatmap
+  ggplot(data = corr_melt, aes(x = Var1, y = Var2, fill = value)) +
+    geom_tile() +
+    scale_fill_gradient2(low = "#415a77", high = "#9a031e", mid = "white", 
+                         midpoint = 0, limit = c(-1,1), space = "Lab", 
+                         name="Correlation") +
+    theme_minimal() +
+    coord_fixed() +
+    labs(title = paste("Tetra-choric correlation", domain_name), 
+         x = "", y = "") +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10),
+          axis.text.y = element_text(size = 10))
+}
+
+
+visualize_tetrachoric(social, "- Social")
+ggsave("social_tetra_corr.png")
+visualize_tetrachoric(health, "- Health ")
+ggsave("health_tetra_corr.png")
+visualize_tetrachoric(culture, "- Culture")
+ggsave("culture_tetra_corr.png")
+
+
+```
+```{r}
+
+
+```
+
+#Scoring scaled
+```{r}
+#Add the scores scaled to the original data frame
+df$social_pc1_score_scaled <- scale(social_pc1_score)
+df$health_pc1_score_scaled <- scale(health_pc1_score)
+df$culture_pc1_score_scaled <- scale(culture_pc1_score)
+
+
+```
+
+#Merge the data 
+```{r}
+#Add the scale scores to the df_m1 data frame, matching the ID LLAVEMOD
+df_model <- df_model3 %>%
+  left_join(df %>% select(LLAVEMOD, social_pc1_score_scaled, health_pc1_score_scaled, culture_pc1_score_scaled), by = "LLAVEMOD")
+#Inspect na values
+#df_model %>% select(social_pc1_score_scaled, health_pc1_score_scaled, culture_pc1_score_scaled) %>% summarise_all(~sum(is.na(.)))
+
+```
+
+
+#Train the model with the new data
+
+```{r}
+# Split the data into training and testing sets
+trainIndex <- createDataPartition(df_model$time, p = .8, list = FALSE, times = 1)
+trainData <- df_model[trainIndex,]
+testData  <- df_model[-trainIndex,]
+
+# Select variables
+X_train <- trainData[, !(names(trainData) %in% c("time", "FAC_CUI", "LLAVEMOD","care_load_intensity", "careload", "activ_care_load" ))]
+Y_train <- trainData$time
+X_test <- testData[, !(names(testData) %in% c("time", "FAC_CUI", "LLAVEMOD", "care_load_intensity", "careload", "activ_care_load"))]
+Y_test <- testData$time
+
+# Wrapper for the SuperLearner
+learners <- c("SL.glmnet", "SL.randomForest", "SL.xgboost")
+
+#  SuperLearner
+set.seed(42)
+super_model <- SuperLearner(Y = Y_train, X = X_train, family = gaussian(),
+                            SL.library = learners, method = "method.NNLS",
+                            obsWeights = trainData$FAC_CUI)
+
+```
+
+```{r}
+
+#Summary
+summary(super_model)
+coef <- super_model$coef
+print(coef)
+
+#Coefficientes glmnet
+glmnet_model <- super_model$fitLibrary$SL.glmnet_All$object
+coef(glmnet_model, s = "lambda.min")
+
+
+#Coefficientes randomForest
+rf_model <- super_model$fitLibrary$SL.randomForest_All$object
+importance(rf_model)
+
+#Coefficientes xgboost
+xgb_model <- super_model$fitLibrary$SL.xgboost_All$object
+dfxgimportance <- (xgb.importance(model = xgb_model))
+#as csv
+write.csv(dfxgimportance, "xgb_importance.csv")
+
+#loss 
+cv_risk <- super_model$cvRisk
+print(cv_risk)
+
+#fit library
+fit_library <- super_model$fitLibrary
+print(fit_library)
+
+
+```
+
+#Evaluate
+
+```{r}
+
+# Predictions
+predicciones_test <- predict(super_model, newdata = X_test, onlySL = TRUE)
+predicciones_test <- predicciones_test$pred
+
+#  RMSE (Root Mean Squared Error)
+rmse_value <- rmse(Y_test, predicciones_test)
+print(paste("RMSE:", rmse_value))
+
+#  MAE (Mean Absolute Error)
+mae_value <- mae(Y_test, predicciones_test)
+print(paste("MAE:", mae_value))
+
+#  R^2 (Coeficiente de determinación)
+r2_value <- R2(predicciones_test, Y_test)
+print(paste("R^2:", r2_value))
+
+# Plot predictions vs real values
+df <- data.frame(Real = Y_test, Predicho = predicciones_test)
+ggplot(df, aes(x = Real, y = Predicho)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  labs(title = "Predicted vs actual values", x = "Actual values", y = "Predicted values")
+ggsave("pred_vs_actual_m4.png")
+
+
+```
+
+
+
+```{r}
+# Residuals
+residuals <- Y_test - predicciones_test
+png("histograma_residuals_m4.png", width = 800, height = 600)
+hist(residuals, main="Histogram of Residuals M4", xlab="Residuals", breaks=20)
+dev.off()
+
+```
+
+
+```{r}
+#Simple linear regression to serve as a baseline
+linear_model <- lm(Y_train ~ ., data = X_train)
+pred_linear <- predict(linear_model, newdata = X_test)
+
+#compare the RMSE of the linear model with the SuperLearner
+rmse_linear <- sqrt(mean((Y_test - pred_linear)^2))
+rmse_super <- sqrt(mean((Y_test - predicciones_test)^2))
+cat("RMSE - Modelo Base (Regresión Lineal):", rmse_linear, "\n")
+cat("RMSE - SuperLearner:", rmse_super, "\n")
+
+```
+
+

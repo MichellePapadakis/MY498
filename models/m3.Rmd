@@ -1,0 +1,573 @@
+---
+title: "Linear"
+author: "Michelle Papadakis"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  pdf_document:
+    latex_engine: xelatex
+    toc: false
+    toc_depth: 2
+    keep_tex: true
+---
+
+
+#Clean the environment
+```{r}
+rm(list=ls())
+```
+
+#Libraries loading
+```{r} 
+#If pacman not installed: install.packages("pacman")
+pacman::p_load(tidyverse, RSQLite, DBI, readr,dplyr,  downloader, nnet, caTools, caret, SuperLearner,MLmetrics, pROC, ranger , glmnet, xgboost, ggcorrplot, car, randomForest, Metrics, ggplot2, SHAPforxgboost, survey)  
+```
+
+# Functions to be used
+```{r}
+
+#Function to one hot encode 
+one_hot_encode <- function(data, column_name) {
+  data[[column_name]] <- as.factor(data[[column_name]])
+  #Excluding the first level
+  dummies <- dummyVars(formula = as.formula(paste0("~ ", column_name)), data = data, fullRank = TRUE)
+  dummy_data <- predict(dummies, newdata = data)
+  data <- cbind(data, dummy_data)
+  data[[column_name]] <- NULL
+  return(data)
+}
+```
+
+#Data fetching
+```{r, data-preparation, echo= FALSE, include=FALSE}
+# To download and unzip the file
+download_and_unzip <- function(url, zip_file, unzip_dir) {
+  download.file(url, zip_file, mode = "wb")
+  unzip(zip_file, exdir = unzip_dir)
+}
+
+# To read and store the data in the database
+read_and_store <- function(db_conn, table_name, file_path) {
+  data <- read_csv(file_path)
+  dbWriteTable(db_conn, table_name, data, overwrite = TRUE)
+}
+
+# Main function
+main <- function() {
+  # Set the URL, zip file, and unzip directory
+  url <- "https://www.inegi.org.mx/contenidos/programas/enasic/2022/microdatos/enasic_2022_bd_csv.zip"
+  zip_file <- tempfile()
+  unzip_dir <- tempdir()
+  
+  # download and unzip the file
+  download_and_unzip(url, zip_file, unzip_dir)
+  
+  # Create the database connection
+  db_path <- tempfile(fileext = ".sqlite")
+  db_conn <- dbConnect(RSQLite::SQLite(), db_path)
+  
+  # read and store the data 
+  read_and_store(db_conn, "thogar", file.path(unzip_dir, "THOGAR.csv"))
+  read_and_store(db_conn, "tpob_cui", file.path(unzip_dir, "TPOB_CUI.csv"))
+  
+  
+  
+  # Query to select data from the tables
+  query <- "
+    SELECT tpob_cui.LLAVEVIV, tpob_cui.LLAVEHOG, tpob_cui.LLAVEMOD, tpob_cui.SEXO, tpob_cui.EDAD, 
+           tpob_cui.P6_7, tpob_cui.P6_8A, tpob_cui.P6_26, tpob_cui.P6_27A, tpob_cui.CPEA, tpob_cui.NIVEL, 
+           tpob_cui.COND_DISC, tpob_cui.P5_10_6, tpob_cui.P5_10_4, tpob_cui.P5_2, 
+           tpob_cui.P5_4, tpob_cui.P5_13, tpob_cui.FILTRO6_9, tpob_cui.P5_6, tpob_cui.PB_CDISC, 
+           tpob_cui.PB_C0005, tpob_cui.PB_C0617, tpob_cui.PB_C60MA, tpob_cui.PB_CETEM, tpob_cui.CT_NHA, 
+           tpob_cui.FILTRO5_1, tpob_cui.FILTRO5_2,  
+           tpob_cui.P5_11, tpob_cui.P5_11A, tpob_cui.FAC_CUI, tpob_cui.P6_13, tpob_cui.P6_14_01, 
+           tpob_cui.P6_14_02, tpob_cui.P6_14_03, tpob_cui.P6_14_04, tpob_cui.P6_14_05, tpob_cui.P6_14_06, 
+           tpob_cui.P6_14_07, tpob_cui.P6_14_08, tpob_cui.P6_14_09, tpob_cui.P6_16_1, tpob_cui.P6_16_2, 
+           tpob_cui.P6_16_3, tpob_cui.P6_16_4, tpob_cui.P6_16_5, tpob_cui.P6_16_6, tpob_cui.P6_16_7, 
+           tpob_cui.P6_16_8, tpob_cui.P6_18_1, tpob_cui.P6_18_2, tpob_cui.P6_18_3, tpob_cui.P6_18_4, 
+           tpob_cui.P6_18_5, tpob_cui.P6_18_6, tpob_cui.P6_19, tpob_cui.P6_20_1, tpob_cui.P6_20_2, 
+           tpob_cui.P6_20_3, tpob_cui.P6_20_4, tpob_cui.P6_21, tpob_cui.P6_22_01, tpob_cui.P6_22_02, 
+           tpob_cui.P6_22_03, tpob_cui.P6_22_04, tpob_cui.P6_22_05, tpob_cui.P6_22_06, tpob_cui.P6_22_07, 
+           tpob_cui.P6_22_08, tpob_cui.P6_22_09, tpob_cui.P6_22_10, tpob_cui.P6_22_11, tpob_cui.P6_22_12, 
+           tpob_cui.P6_22_13, tpob_cui.P6_22_14, tpob_cui.P6_1, tpob_cui.P6_2_01, tpob_cui.P6_2_02, tpob_cui.P6_2_03, 
+           tpob_cui.P6_2_04, tpob_cui.P6_2_05, tpob_cui.P6_2_06, tpob_cui.P6_2_07, tpob_cui.P6_2_08, 
+           tpob_cui.P6_2_09, tpob_cui.P6_2_10, tpob_cui.P6_2_11, tpob_cui.P6_2_12, tpob_cui.P6_2_13, 
+           tpob_cui.P6_2_14, tpob_cui.P5_32, tpob_cui.P5_34, tpob_cui.P6_6_1, tpob_cui.P6_6_2, tpob_cui.FILTRO6_1,
+           tpob_cui.FILTRO6_2, tpob_cui.FILTRO6_4, tpob_cui.FILTRO6_5, tpob_cui.FILTRO6_6,
+           thogar.P3A_3_1, thogar.P3A_3_2, thogar.P3A_3_3,thogar.P3A_3_4,tpob_cui.P6_3, tpob_cui.P6_23,
+           tpob_cui.P6_36_3, tpob_cui.P6_39_1, tpob_cui.P6_39_2, tpob_cui.P6_39_3,
+           thogar.P3A_3_5, thogar.P3A_3_6, thogar.P3A_3_7, thogar.P3A_5, thogar.P2_4_1, thogar.P2_4_2, thogar.P2_4_3, thogar.P2_4_4
+    FROM tpob_cui
+    LEFT JOIN thogar ON tpob_cui.LLAVEVIV = thogar.LLAVEVIV AND tpob_cui.LLAVEHOG = thogar.LLAVEHOG
+    WHERE PB_CDISC = 1 OR PB_C0005 = 1 OR PB_C0617 = 1 OR PB_C60MA = 1 OR PB_CETEM = 1
+  "
+  
+  # Get the filtered data
+  data_filtered <- dbGetQuery(db_conn, query)
+  
+  # Close the database connection
+  dbDisconnect(db_conn)
+  
+  return(data_filtered)
+}
+
+care_vars <- c("P6_13", "P6_14_01", "P6_14_02", "P6_14_03", "P6_14_04", "P6_14_05", "P6_14_06", 
+               "P6_14_07", "P6_14_08", "P6_14_09", "P6_16_1", "P6_16_2", "P6_16_3", "P6_16_4", 
+               "P6_16_5", "P6_16_6", "P6_16_7", "P6_16_8", "P6_18_1", "P6_18_2", "P6_18_3", 
+               "P6_18_4", "P6_18_5", "P6_18_6", "P6_19", "P6_20_1", "P6_20_2", "P6_20_3", 
+               "P6_20_4", "P6_21", "P6_22_01", "P6_22_02", "P6_22_03", "P6_22_04", "P6_22_05", 
+               "P6_22_06", "P6_22_07", "P6_22_08", "P6_22_09", "P6_22_10", "P6_22_11", 
+               "P6_22_12", "P6_22_13", "P6_22_14", "P6_1", "P6_2_01", "P6_2_02", "P6_2_03", "P6_2_04", 
+               "P6_2_05", "P6_2_06", "P6_2_07", "P6_2_08", "P6_2_09", "P6_2_10", "P6_2_11", 
+               "P6_2_12", "P6_2_13", "P6_2_14")
+# Call the main function
+df <- main()
+data <- df
+
+
+
+```
+
+
+
+#Feature engineering
+
+```{r}
+
+# Goverment transfer  ##########################################################
+data <- data %>%
+  mutate(across(starts_with("P3A_3"), ~ifelse(. == 1, 1, 0))) %>%
+  rename(govt_mother_child = P3A_3_1) %>%
+  rename(govt_basic_edu = P3A_3_2) %>%
+  rename(govt_high_school = P3A_3_3) %>%
+  rename(govt_youth_employment = P3A_3_4) %>%
+  rename(govt_disability_pension = P3A_3_5) %>%
+  rename(govt_pension = P3A_3_6) %>%
+  rename(govt_women_insurance = P3A_3_7)
+
+
+# Monthly income range  ########################################################
+data <- data %>%
+  mutate(P3A_5 = as.numeric(P3A_5)) %>%
+  rename(month_y_range = P3A_5) %>%
+  filter(month_y_range != 99) # Discard the not specified income range 
+   
+
+# Hire of external workers  ####################################################
+data <- data %>%
+  mutate(P2_4_1 = ifelse(is.na(P2_4_1), 0, P2_4_1)) %>%
+  mutate(P2_4_2 = ifelse(is.na(P2_4_2), 0, P2_4_2)) %>%
+  mutate(P2_4_3 = ifelse(is.na(P2_4_3), 0, P2_4_3)) %>%
+  mutate(P2_4_4 = ifelse(is.na(P2_4_4), 0, P2_4_4)) %>%
+  mutate(external_workers = ifelse(P2_4_1 == 1 | 
+                                   P2_4_2 == 1 | 
+                                   P2_4_3 == 1 | P2_4_4 == 1, 1, 0)) %>%
+  select(-P2_4_1, -P2_4_2, -P2_4_3, -P2_4_4)
+
+
+
+# Economic active population  ##################################################
+data <- data %>%
+  mutate(CPEA = ifelse(CPEA == 1, 1, 0)) %>%
+  rename(economic_active = CPEA)
+
+
+# Full time workers (>= 35 hrs x week INEGI)  ##################################
+data <- data %>%
+  mutate(FILTRO5_1 = ifelse(is.na(FILTRO5_1), 0, FILTRO5_1)) %>%
+  mutate(fulltime_work = ifelse(FILTRO5_1 == 2, 1, 0)) 
+
+
+
+# Work hours per week  #########################################################
+data <- data %>%
+  mutate(P5_13 = ifelse(P5_13 == 99, 0, P5_13)) %>%
+  mutate(P5_13 = ifelse(is.na(P5_13), 0, P5_13)) %>%
+  mutate(P5_13 = as.numeric(P5_13)) %>%
+  rename(working_hrs = P5_13)
+
+
+# Education level  #############################################################
+data <- data %>% filter(NIVEL != 9)
+data <- one_hot_encode(data, "NIVEL")
+
+
+# Disability  ##################################################################
+data <- data %>%
+  mutate(COND_DISC = ifelse(COND_DISC == 1, 1,0)) %>%
+  rename(disability = COND_DISC)
+
+
+# Mariatal status  #############################################################
+data <- data %>%
+  mutate(P5_2 = case_when(
+    P5_2 == 1 ~ 2, # living together
+    P5_2 == 2 ~ 3, # separated
+    P5_2 == 3 ~ 4, # divorced
+    P5_2 == 4 ~ 5, # widowed
+    P5_2 == 5 ~ 6, # married
+    P5_2 == 6 ~ 1, # Single taken as reference
+    TRUE ~ P5_2  
+  )) %>%
+  rename(marital_status = P5_2)
+
+data <- one_hot_encode(data, "marital_status")
+
+
+
+# Indigenous ###################################################################
+data <- data %>%
+  mutate(P5_4 = as.numeric(P5_4)) %>%
+  mutate(P5_4 = ifelse(P5_4 == 1, 1, 0)) %>%
+  rename(indigenous = P5_4) #If the don´t now, we assume they are not 
+
+
+# Have social security #########################################################
+data <- data %>%
+  mutate(have_ss = ifelse(is.na(P5_10_6), 0,ifelse(P5_10_6 == 1, 1, 0)))
+  data <- data %>% select(-P5_10_6)
+
+
+# Have child care access #######################################################
+data <- data %>%
+  mutate(have_care_ss = ifelse(is.na(P5_10_4), 0, ifelse(P5_10_4 == 1, 1, 0))) 
+  data <- data %>% select(-P5_10_4) 
+
+# Spent caring #################################################################
+data <- data %>%
+  mutate(P6_7 = ifelse(is.na(P6_7), 0, P6_7),
+         P6_26 = ifelse(is.na(P6_26), 0, P6_26)) %>%
+  mutate(P6_7 = as.numeric(P6_7),
+         P6_26 = as.numeric(P6_26)) %>%
+  mutate(time = rowSums(across(c(P6_7, P6_26)), na.rm = TRUE)) %>%
+  mutate(time = as.numeric(time)) %>%
+  filter(!(time >= 98 & FILTRO5_1 == 2))
+data <- data %>% select(-FILTRO5_1)
+# Sex ##########################################################################
+data <- data %>%
+  mutate(SEXO = ifelse(SEXO == 1, 0, 1)) %>% #1 end up as women
+  rename(sex = SEXO)
+
+# Age range ####################################################################
+data <- data %>%
+  filter(EDAD != 98) %>%
+  mutate(EDAD = as.numeric(EDAD)) %>%
+  mutate(age_range = case_when(
+    EDAD >= 15 & EDAD < 18 ~ 1,
+    EDAD >= 18 & EDAD < 30 ~ 2,
+    EDAD >= 30 & EDAD < 40 ~ 3,
+    EDAD >= 40 & EDAD < 50 ~ 4,
+    EDAD >= 50 & EDAD < 60 ~ 5,
+    EDAD >= 60 ~ 6
+  )) %>%
+  select(-EDAD) 
+
+data <- one_hot_encode(data, "age_range")
+
+
+# Provide care to other households #############################################
+data <- data %>%
+  mutate(FILTRO6_9 = ifelse(is.na(FILTRO6_9), 0, ifelse(FILTRO6_9 == 1, 1, 0))) %>%
+  rename(care_othouse = FILTRO6_9)
+
+# Activities ###################################################################
+data <- data %>%
+  mutate(P5_6 = ifelse(is.na(P5_6), 0, P5_6)) %>%
+  mutate(act_housework = ifelse(P5_6 == 6, 1, 0)) %>%
+  mutate(act_retired = ifelse(P5_6 == 4, 1, 0)) %>%
+  mutate(act_student = ifelse(P5_6 == 5, 1, 0)) 
+  data <- data %>% select(-P5_6) 
+
+
+# Subordinate ##################################################################
+data <- data %>%
+  mutate(FILTRO5_2 = ifelse(is.na(FILTRO5_2), 0, FILTRO5_2)) %>%
+  mutate(subord = ifelse(FILTRO5_2 == 1, 1, 0)) 
+  data <- data %>% select (-FILTRO5_2) 
+
+
+
+# Labor income ################################################################
+data <- data %>%
+  mutate(P5_11 = as.numeric(P5_11)) %>%
+  mutate(P5_11A = as.numeric(P5_11A)) %>%
+  mutate(P5_11 = ifelse(is.na(P5_11), 0, P5_11)) %>%
+  mutate(P5_11A = ifelse(is.na(P5_11A), 0, P5_11A)) 
+data <- data %>% filter(P5_11 != 99888) 
+data <- data %>%
+  mutate(month_labor_y = case_when(
+    P5_11A == 1 ~ P5_11 * 4,  # weekly
+    P5_11A == 2 ~ P5_11 * 2,  # biweekly
+    P5_11A == 3 ~ P5_11 * 1,  # monthly
+    P5_11A == 4 ~ P5_11 / 12, # yearly
+    TRUE ~ 0
+  ))
+  data <- data %>% select (c(-P5_11, -P5_11A))
+
+
+# Receives payment for care ####################################################
+data <- data %>%
+  mutate(
+  P6_27A = as.numeric(P6_27A),
+  P6_27A = ifelse(is.na(P6_27A), 0, P6_27A),
+  P6_8A = as.numeric(P6_8A), 
+  P6_8A = ifelse(is.na(P6_8A), 0, P6_8A)) %>%
+  filter(P6_27A != 9888 & P6_8A != 9888) %>% # refusals
+  mutate (get_pay = P6_27A + P6_8A)
+  data <- data %>% select(-P6_27A, -P6_8A)
+
+
+# Care load ###################################################################
+data <- data %>%
+  mutate(
+    PB_CDISC = ifelse(is.na(PB_CDISC), 0, PB_CDISC),
+    PB_C0005 = ifelse(is.na(PB_C0005), 0, PB_C0005),
+    PB_C0617 = ifelse(is.na(PB_C0617), 0, PB_C0617),
+    PB_C60MA = ifelse(is.na(PB_C60MA), 0, PB_C60MA),
+    PB_CETEM = ifelse(is.na(PB_CETEM), 0, PB_CETEM)
+  )
+
+data <- data %>%
+  mutate(careload = rowSums(across(c(PB_CDISC, PB_C0005, PB_C0617, PB_C60MA, PB_CETEM)), na.rm = TRUE)) 
+
+
+# Care load activities #########################################################
+care_load_variables <- data %>% select(all_of(care_vars)) #select construction variables
+care_load_variables <- care_load_variables %>% 
+  mutate(across(everything(), ~ ifelse(is.na(.) | . == 2 | . == 0, 0, 1))) 
+data <- data %>%
+  mutate(activ_care_load = rowSums(care_load_variables, na.rm = TRUE)) 
+data <- data %>% select(-all_of(care_vars)) 
+
+
+# Care activities  #########################################################
+data <- data %>%
+  mutate(
+    careload = ifelse(is.na(careload), 0, careload),
+    activ_care_load = ifelse(is.na(activ_care_load), 0, activ_care_load)
+  ) %>%
+  filter(
+    !(P6_26 != 0 & !is.na(P6_26) & careload == 0 & activ_care_load == 0)
+  )
+
+
+data <- data %>%
+  mutate(
+    careload = ifelse(is.na(careload), 0, careload),
+    activ_care_load = ifelse(is.na(activ_care_load), 0, activ_care_load)
+  ) %>%
+  filter(!(P6_26 != 0 & !is.na(P6_26) & careload == 0 & activ_care_load == 0)) %>%
+  mutate(
+    care_load = ifelse(P6_26 == 0 | is.na(P6_26) | careload == 0, NA,
+                                  (activ_care_load /careload)*P6_26)) 
+data <- data %>% filter(!is.na(care_load))
+
+
+
+# Having children as a reason for not working ##################################
+data <- data %>%
+  mutate(P5_32 = as.numeric(P5_32)) %>%
+  mutate(P5_32 = ifelse(is.na(P5_32), 0, P5_32)) %>%
+  mutate(nowork_bc_care = ifelse(P5_32 == 7, 1, 0), )
+  data <- data %>% select(-P5_32)
+
+
+# Having care responsibilities as a reason for never worked ####################
+data <- data %>%
+  mutate(P5_34 = ifelse(is.na(P5_34), 0, P5_34)) %>%
+  mutate(neverwork_bc_care = ifelse(P5_34 == 3 | P5_34 == 4, 1, 0))
+  data <- data %>% select (-P5_34) 
+
+#Time has been caring (months) #################################################
+data <- data %>%
+  mutate(P6_6_1 = as.numeric(P6_6_1)) %>%
+  mutate(P6_6_2 = as.numeric(P6_6_2)) %>%
+  mutate(P6_6_1 = ifelse(is.na(P6_6_1), 0, P6_6_1)) %>%
+  mutate(P6_6_2 = ifelse(is.na(P6_6_2), 0, P6_6_2))
+  data <- data %>% filter(P6_6_1 != 99) 
+  data <- data %>% filter(P6_6_2 != 99) 
+  data <- data %>% mutate(months_caring = P6_6_1 * 12 + P6_6_2) 
+  data <- data %>% select(-P6_6_1, -P6_6_2)
+
+
+# Care type #################################################################### 
+data <- data %>%
+  mutate(across(starts_with("FILTRO"), ~as.numeric(.)))
+data <- data %>%
+  mutate(
+    FILTRO6_1 = ifelse(is.na(FILTRO6_1), 0, ifelse(FILTRO6_1 == 1, 1, 0)), 
+    FILTRO6_2 = ifelse(is.na(FILTRO6_2), 0, ifelse(FILTRO6_2 == 1, 1, 0)), 
+    FILTRO6_4 = ifelse(is.na(FILTRO6_4), 0, ifelse(FILTRO6_4 == 1, 1, 0)),
+    FILTRO6_5 = ifelse(is.na(FILTRO6_5), 0, ifelse(FILTRO6_5 == 1, 1, 0)), 
+    FILTRO6_6 = ifelse(is.na(FILTRO6_6), 0, ifelse(FILTRO6_6 == 1, 1, 0)),) 
+#rename
+data <- data %>%
+  rename(care_disability = FILTRO6_1) %>%
+  rename(care_0_5 = FILTRO6_2) %>%
+  rename(care_6_11 = FILTRO6_4) %>%
+  rename(care_12_17 = FILTRO6_5) %>%
+  rename(care_elderly = FILTRO6_6) 
+
+#Has received training in care ################################################
+data <- data %>%
+  mutate(P6_3 = as.numeric(P6_3)) %>%
+  mutate(P6_23 = as.numeric(P6_23)) %>%
+  mutate(P6_36_3 = as.numeric(P6_36_3)) 
+  data <- data %>%
+  mutate(P6_3 = ifelse(is.na(P6_3), 0, P6_3)) %>%
+  mutate(P6_23 = ifelse(is.na(P6_23), 0, P6_23)) %>%
+  mutate(P6_36_3 = ifelse(is.na(P6_36_3), 0, P6_36_3)) 
+  data <- data %>%
+  mutate(received_training = ifelse(P6_3 == 1 | P6_23 == 1 | P6_36_3 == 1, 1, 0)) %>%
+  select(-c(P6_3, P6_23, P6_36_3))
+  
+#Unsatisfied with the care provided ################################################
+  data <- data %>%
+  mutate(P6_39_1 = as.numeric(P6_39_1)) %>%
+  mutate(P6_39_2 = as.numeric(P6_39_2)) %>%
+  mutate(P6_39_3 = as.numeric(P6_39_3))
+  data <- data %>%
+  mutate(P6_39_1 = ifelse(is.na(P6_39_1), 0, P6_39_1)) %>%
+  mutate(P6_39_2 = ifelse(is.na(P6_39_2), 0, P6_39_2)) %>%
+  mutate(P6_39_3 = ifelse(is.na(P6_39_3), 0, P6_39_3))
+  data <- data %>%
+  mutate(unsatisfied_care = ifelse(P6_39_1 == 2 | P6_39_2 == 2 | P6_39_3 == 2, 1, 0)) %>%
+  select(-c(P6_39_1, P6_39_2, P6_39_3))
+#delete obs of 120 or more hours
+data <- data %>% filter(time < 120) #an aproximation of the maximun hours a person can work in a week in extreme cases
+
+write.csv(data, "final_data_m3_unscaled.csv", row.names = FALSE)
+```
+
+# Final data cleaning and scaling
+```{r}
+#Scale the data
+vars_to_scale <- c( "working_hrs", "CT_NHA", "month_y_range",  "month_labor_y", "get_pay", "months_caring", "care_load")
+data <- data %>% mutate(across(all_of(vars_to_scale), ~ scale(.)[, 1]))
+# Drop the variables that are not going to be used
+data <- data %>% select(-c( P6_26, P6_7, PB_CDISC, PB_C0005, PB_C0617, PB_C60MA, PB_CETEM, LLAVEVIV, LLAVEHOG, careload, activ_care_load ))
+#Save data cleaned
+write.csv(data, "final_data_m3_scaled.csv", row.names = FALSE)
+
+```
+
+#Superlearner model training
+
+```{r}
+#Quick check the distribution of the dependent variable
+survey_design <- svydesign(ids = ~1, weights = ~FAC_CUI, data = data)
+svyhist(~time, survey_design)
+
+# Division of the data into training and test sets
+trainIndex <- createDataPartition(data$time, p = .8, list = FALSE, times = 1)
+trainData <- data[trainIndex,]
+testData  <- data[-trainIndex,]
+
+# Divide the data into X and Y variables
+X_train <- trainData[, !(names(trainData) %in% c("time", "FAC_CUI", "LLAVEMOD"))]
+Y_train <- trainData$time
+X_test <- testData[, !(names(testData) %in% c("time", "FAC_CUI", "LLAVEMOD"))]
+Y_test <- testData$time
+
+#  learners wrappers
+learners <- c("SL.glmnet", "SL.randomForest", "SL.xgboost")
+
+# Set the seed and run the SuperLearner
+set.seed(42)
+super_model <- SuperLearner(Y = Y_train, X = X_train, family = gaussian(),
+                            SL.library = learners, method = "method.NNLS",
+                            obsWeights = trainData$FAC_CUI)
+
+
+
+```
+
+# Model performance
+
+```{r}
+ #Look a the summary
+summary(super_model)
+coef <- super_model$coef
+print(coef)
+
+# Glmnet coefficients
+glmnet_model <- super_model$fitLibrary$SL.glmnet_All$object
+coef(glmnet_model, s = "lambda.min")
+
+# FandomForest coefficients
+rf_model <- super_model$fitLibrary$SL.randomForest_All$object
+rf_importance <- importance(rf_model)
+
+
+# Xgboost coefficients
+xgb_model <- super_model$fitLibrary$SL.xgboost_All$object
+xgb_importance <- xgb.importance(model = xgb_model)
+write.csv(xgb_importance, "xgb_importance_m3.csv", row.names = TRUE)
+
+
+#Model loss
+cv_risk <- super_model$cvRisk
+print(cv_risk)
+
+fit_library <- super_model$fitLibrary
+print(fit_library)
+```
+
+# Model evaluation
+```{r}
+#Predict on test data
+predicciones_test <- predict(super_model, newdata = X_test, onlySL = TRUE)
+predicciones_test <- predicciones_test$pred
+
+# Root Mean Squared Error
+rmse_value <- rmse(Y_test, predicciones_test)
+print(paste("RMSE:", rmse_value))
+
+# Mean Absolute Error
+mae_value <- mae(Y_test, predicciones_test)
+print(paste("MAE:", mae_value))
+
+#Coefficient of Determination
+r2_value <- R2(predicciones_test, Y_test)
+print(paste("R^2:", r2_value))
+
+# Visualize performance
+df <- data.frame(Real = Y_test, Predicho = predicciones_test)
+ggplot(df, aes(x = Real, y = Predicho)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  labs(title = "Predicted vs actual values", x = "Actual values", y = "Predicted values")
+ggsave("pred_vs_actual_m3.png")
+
+```
+
+
+
+
+```{r}
+# Residuals
+residuals <- Y_test - predicciones_test
+png("histograma_residuals_m4.png", width = 800, height = 600)
+hist(residuals, main="Histogram of Residuals M4", xlab="Residuals", breaks=10)
+dev.off()
+
+```
+
+
+```{r}
+#Simple linear regression to serve as a baseline
+linear_model <- lm(Y_train ~ ., data = X_train)
+pred_linear <- predict(linear_model, newdata = X_test)
+
+#compare the RMSE of the linear model with the SuperLearner
+rmse_linear <- sqrt(mean((Y_test - pred_linear)^2))
+rmse_super <- sqrt(mean((Y_test - predicciones_test)^2))
+cat("RMSE - Modelo Base (Regresión Lineal):", rmse_linear, "\n")
+cat("RMSE - SuperLearner:", rmse_super, "\n")
+
+```

@@ -1,0 +1,825 @@
+---
+title: "Model 2"
+author: "Michelle Papadakis"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  pdf_document:
+    latex_engine: xelatex
+    toc: false
+    toc_depth: 2
+    keep_tex: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Clean the environment
+```{r}
+rm(list=ls())
+```
+
+#Libraries loading
+```{r}
+#if package is not installed: install.packages("pacman")
+pacman::p_load(tidyverse, RSQLite, DBI, readr, downloader, nnet, caTools, caret, SuperLearner, 
+               MLmetrics, pROC, ranger, glmnet, xgboost, ggcorrplot, DescTools, factoextra, survey, smotefamily, broom, dplyr, ggplot2)
+
+```
+
+#Data fetching 
+```{r, include=FALSE}
+
+# Download and unzip data function
+download_and_unzip_data <- function(url, zip_file, unzip_dir) {
+  download.file(url, destfile = zip_file, mode = "wb")
+  unzip(zip_file, exdir = unzip_dir)
+}
+
+# Read the CSV files and store them in the SQLite database function
+read_and_store <- function(db_conn, table_name, file_path) {
+  data <- read_csv(file_path)
+  dbWriteTable(db_conn, table_name, data, overwrite = TRUE)
+}
+
+
+main <- function() {
+  # Function inputs
+  url <- "https://www.inegi.org.mx/contenidos/programas/enasic/2022/microdatos/enasic_2022_bd_csv.zip"
+  zip_file <- tempfile()
+  unzip_dir <- tempdir()
+  
+  # Call 1st function
+  download_and_unzip_data(url, zip_file, unzip_dir)
+  
+  # Create SQLite database and connection
+  db_path <- tempfile(fileext = ".sqlite")
+  db_conn <- dbConnect(SQLite(), db_path)
+  
+  # Call 2nd function
+  read_and_store(db_conn, "tpob_cui", file.path(unzip_dir, "TPOB_CUI.csv"))
+  read_and_store(db_conn, "thogar", file.path(unzip_dir, "THOGAR.csv"))
+  read_and_store(db_conn, "tper_ele", file.path(unzip_dir, "TPER_ELE.csv"))
+  
+
+  #Query to join tables
+  query <- "
+    SELECT tper_ele.LLAVEVIV, tper_ele.LLAVEHOG, tper_ele.LLAVEMOD, tper_ele.FAC_ELE, tper_ele.EDAD, 
+           tper_ele.SEXO, tper_ele.COND_DISC, tper_ele.P5_2, tper_ele.P5_4, tper_ele.P5_11, tper_ele.CT_NHA,
+           tper_ele.P5_11A, tper_ele.NIVEL, tper_ele.FILTRO5_1,tper_ele.FILTRO5_2, tper_ele.CPEA, tper_ele.P5_13, tper_ele.P5_6, 
+           tper_ele.P5_10_4, tper_ele.P5_10_6, tper_ele.P5_29, tper_ele.P5_32, tper_ele.P5_33, tper_ele.P5_34,
+           tpob_cui.PB_CDISC, tpob_cui.PB_C0005, tpob_cui.PB_C0617, tpob_cui.PB_C60MA, 
+           tpob_cui.PB_CETEM, thogar.P3A_3_1, thogar.P3A_3_2, thogar.P3A_3_3, thogar.P3A_3_4, thogar.P2_4_2, 
+           thogar.P3A_3_5, thogar.P3A_3_6, thogar.P3A_3_7, thogar.P3A_5, thogar.P2_4_1, 
+           thogar.P2_4_3, thogar.P2_4_4
+    FROM tper_ele
+    LEFT JOIN tpob_cui ON tper_ele.LLAVEVIV = tpob_cui.LLAVEVIV AND tper_ele.LLAVEHOG = tpob_cui.LLAVEHOG AND tper_ele.LLAVEMOD = tpob_cui.LLAVEMOD
+    LEFT JOIN thogar ON tper_ele.LLAVEVIV = thogar.LLAVEVIV AND tper_ele.LLAVEHOG = thogar.LLAVEHOG
+  "
+
+  data_filtered <- dbGetQuery(db_conn, query)
+  dbDisconnect(db_conn) #Close  connection
+  return(data_filtered)
+}
+
+# Call main function
+df <- main()
+merged_data <- df
+
+
+```
+#Extra functions
+```{r}
+# Function to recode binary variables
+recode_binary <- function(data, variable, na_value = 0) {
+  data %>%
+    mutate({{ variable }} := ifelse(is.na({{ variable }}), na_value, ifelse({{ variable }} == 1, 1, 0)))
+}
+
+# Function to convert to numeric and scale variables
+convert_and_scale <- function(data, var) {
+  data %>%
+    mutate({{ var }} := as.numeric(as.character({{ var }}))) %>%
+    mutate({{ var }} := scale({{ var }}))
+}
+
+#Function to one hot encode 
+one_hot_encode <- function(data, column_name) {
+  data[[column_name]] <- as.factor(data[[column_name]])
+  #Excluding the first level
+  dummies <- dummyVars(formula = as.formula(paste0("~ ", column_name)), data = data, fullRank = TRUE)
+  dummy_data <- predict(dummies, newdata = data)
+  data <- cbind(data, dummy_data)
+  data[[column_name]] <- NULL
+  return(data)
+}
+
+```
+
+#Feature engineering
+
+```{r}
+# Sex ##########################################################################
+merged_data <- merged_data %>%
+  mutate(SEXO = ifelse(SEXO == 1, 0, 1)) %>% #1 end up as women
+  rename(sex = SEXO)
+
+# Economic active ##############################################################
+merged_data <- merged_data %>%
+  mutate(CPEA = ifelse(CPEA == 1, 1, 0)) %>%
+  rename(economic_active = CPEA)
+
+
+# Care variable ###############################################################
+merged_data <- merged_data %>%
+  mutate(PB_CDISC = as.numeric(as.character(PB_CDISC)),
+         PB_CDISC = ifelse(is.na(PB_CDISC), 0, PB_CDISC),
+         PB_C0005 = as.numeric(as.character(PB_C0005)),
+         PB_C0005 = ifelse(is.na(PB_C0005), 0, PB_C0005),
+         PB_C0617 = as.numeric(as.character(PB_C0617)),
+         PB_C0617 = ifelse(is.na(PB_C0617), 0, PB_C0617),
+         PB_C60MA = as.numeric(as.character(PB_C60MA)),
+         PB_C60MA = ifelse(is.na(PB_C60MA), 0, PB_C60MA),
+         PB_CETEM = as.numeric(as.character(PB_CETEM)),
+         PB_CETEM = ifelse(is.na(PB_CETEM), 0, PB_CETEM))
+
+# Preserve only observations with one type of care / principal care reported (multicare 524 obs)
+merged_data <- merged_data %>%
+  mutate(multi_care = rowSums(select(., PB_CDISC, PB_C0005, PB_C0617, PB_C60MA, PB_CETEM))) 
+merged_data <- merged_data %>% filter(multi_care <= 1) %>%  select(-multi_care)
+
+
+merged_data <- merged_data %>%
+  mutate(care = case_when(
+    PB_C0005 == 1 ~ 1,
+    PB_C0617 == 1 ~ 2,
+    PB_C60MA == 1 ~ 3,
+    PB_CDISC == 1 ~ 4,
+    TRUE ~ 0
+  ))
+
+table(merged_data$care)
+
+# Monthly income range  ########################################################
+merged_data <- merged_data %>%
+  mutate(P3A_5 = as.numeric(P3A_5)) %>%
+  rename(month_y_range = P3A_5) %>%
+  filter(month_y_range != 99) # Discard the not specified income range 
+   
+
+# Labor income #################################################################
+merged_data <- merged_data %>%
+  mutate(P5_11 = as.numeric(P5_11)) %>%
+  mutate(P5_11A = as.numeric(P5_11A)) %>%
+  mutate(P5_11 = ifelse(is.na(P5_11), 0, P5_11)) %>%
+  mutate(P5_11A = ifelse(is.na(P5_11A), 0, P5_11A)) 
+merged_data <- merged_data %>% filter(P5_11 != 99888) 
+merged_data <- merged_data %>%
+  mutate(month_labor_y = case_when(
+    P5_11A == 1 ~ P5_11 * 4,  # weekly
+    P5_11A == 2 ~ P5_11 * 2,  # biweekly
+    P5_11A == 3 ~ P5_11 * 1,  # monthly
+    P5_11A == 4 ~ P5_11 / 12, # yearly
+    TRUE ~ 0
+  ))
+  merged_data <- merged_data %>% select (c(-P5_11, -P5_11A))
+  
+# Full time workers (>= 35 hrs x week INEGI)  ##################################
+merged_data <- merged_data %>%
+  mutate(FILTRO5_1 = ifelse(is.na(FILTRO5_1), 0, FILTRO5_1)) %>%
+  mutate(fulltime_work = ifelse(FILTRO5_1 == 2, 1, 0)) 
+
+# Subordinate ##################################################################
+merged_data <- merged_data %>%
+  mutate(FILTRO5_2 = ifelse(is.na(FILTRO5_2), 0, FILTRO5_2)) %>%
+  mutate(subord = ifelse(FILTRO5_2 == 1, 1, 0)) 
+  merged_data <- merged_data %>% select (-FILTRO5_2) 
+
+  
+# Work hours per week  #########################################################
+merged_data <- merged_data %>%
+  mutate(P5_13 = as.numeric(P5_13)) %>%
+  mutate (P5_13 = ifelse(P5_13 == 99, 0, P5_13)) %>%
+  mutate(P5_13 = ifelse(is.na(P5_13), 0, P5_13)) %>%
+  rename(working_hrs = P5_13)
+  
+
+# Education level  #############################################################
+merged_data <- merged_data %>% filter(NIVEL != 9)
+#rename to level
+merged_data <- merged_data %>% rename(level = NIVEL)
+merged_data <- one_hot_encode(merged_data, "level")
+
+
+# Disability  ##################################################################
+merged_data <- merged_data %>%
+  mutate(COND_DISC = ifelse(COND_DISC == 1, 1,0)) %>%
+  rename(disability = COND_DISC)
+
+
+# Mariatal status  #############################################################
+merged_data <- merged_data %>%
+  mutate(P5_2 = case_when(
+    P5_2 == 1 ~ 2, # living together
+    P5_2 == 2 ~ 3, # separated
+    P5_2 == 3 ~ 4, # divorced
+    P5_2 == 4 ~ 5, # widowed
+    P5_2 == 5 ~ 6, # married
+    P5_2 == 6 ~ 1, # Single taken as reference
+    TRUE ~ P5_2  
+  )) %>%
+  rename(marital_status = P5_2)
+
+merged_data <- one_hot_encode(merged_data, "marital_status")
+
+
+
+# Indigenous ###################################################################
+merged_data <- merged_data %>%
+  mutate(P5_4 = as.numeric(P5_4)) %>%
+  mutate(P5_4 = ifelse(P5_4 == 1, 1, 0)) %>%
+  rename(indigenous = P5_4) #If the don´t now, we assume they are not 
+
+
+# Have social security #########################################################
+merged_data <- merged_data %>%
+  mutate(have_ss = ifelse(is.na(P5_10_6), 0,ifelse(P5_10_6 == 1, 1, 0)))
+  merged_data <- merged_data %>% select(-P5_10_6)
+
+
+# Have child care access #######################################################
+merged_data <- merged_data %>%
+  mutate(have_care_ss = ifelse(is.na(P5_10_4), 0, ifelse(P5_10_4 == 1, 1, 0))) 
+  merged_data <- merged_data %>% select(-P5_10_4) 
+  
+# Activities ###################################################################
+merged_data <- merged_data %>%
+  mutate(P5_6 = ifelse(is.na(P5_6), 0, P5_6)) %>%
+  mutate(act_housework = ifelse(P5_6 == 6, 1, 0)) %>%
+  mutate(act_retired = ifelse(P5_6 == 4, 1, 0)) %>%
+  mutate(act_student = ifelse(P5_6 == 5, 1, 0)) 
+  merged_data <- merged_data %>% select(-P5_6) 
+
+# Having children as a reason for not working ##################################
+merged_data <- merged_data %>%
+  mutate(P5_32 = as.numeric(P5_32)) %>%
+  mutate(P5_32 = ifelse(is.na(P5_32), 0, P5_32)) %>% 
+  mutate(nowork_bc_care = ifelse(P5_32 == 7, 1, 0), )
+  merged_data <- merged_data %>% select(-P5_32)
+
+
+# Having care responsibilities as a reason for never worked ####################
+merged_data <- merged_data %>%
+  mutate(P5_34 = ifelse(is.na(P5_34), 0, P5_34)) %>%
+  mutate(neverwork_bc_care = ifelse(P5_34 == 3 | P5_34 == 4, 1, 0))
+  merged_data <- merged_data %>% select (-P5_34) 
+
+
+
+# Hire of external workers  ####################################################
+merged_data <- merged_data %>%
+  mutate(P2_4_1 = ifelse(is.na(P2_4_1), 0, P2_4_1)) %>%
+  mutate(P2_4_2 = ifelse(is.na(P2_4_2), 0, P2_4_2)) %>%
+  mutate(P2_4_3 = ifelse(is.na(P2_4_3), 0, P2_4_3)) %>%
+  mutate(P2_4_4 = ifelse(is.na(P2_4_4), 0, P2_4_4)) %>%
+  mutate(external_workers = ifelse(P2_4_1 == 1 | 
+                                   P2_4_2 == 1 | 
+                                   P2_4_3 == 1 | P2_4_4 == 1, 1, 0)) %>%
+  select(-P2_4_1, -P2_4_2, -P2_4_3, -P2_4_4)
+
+
+
+# Age range ####################################################################
+merged_data <- merged_data %>%
+  filter(EDAD != 98) %>%
+  mutate(EDAD = as.numeric(EDAD)) %>%
+  mutate(age_range = case_when(
+    EDAD >= 15 & EDAD < 18 ~ 1,
+    EDAD >= 18 & EDAD < 30 ~ 2,
+    EDAD >= 30 & EDAD < 40 ~ 3,
+    EDAD >= 40 & EDAD < 50 ~ 4,
+    EDAD >= 50 & EDAD < 60 ~ 5,
+    EDAD >= 60 ~ 6
+  )) %>%
+  select(-EDAD) 
+
+merged_data <- one_hot_encode(merged_data, "age_range")
+
+
+# Goverment transfer  ##########################################################
+merged_data <- merged_data %>%
+  mutate(across(starts_with("P3A_3"), ~ifelse(. == 1, 1, 0))) %>%
+  rename(govt_mother_child = P3A_3_1) %>%
+  rename(govt_basic_edu = P3A_3_2) %>%
+  rename(govt_high_school = P3A_3_3) %>%
+  rename(govt_youth_employment = P3A_3_4) %>%
+  rename(govt_disability_pension = P3A_3_5) %>%
+  rename(govt_pension = P3A_3_6) %>%
+  rename(govt_women_insurance = P3A_3_7)
+
+
+# Work desire ##################################################################
+merged_data <- merged_data %>%
+  mutate(P5_29 = as.numeric(P5_29)) %>%
+  mutate(P5_29 = ifelse(is.na(P5_29), 0, P5_29)) %>%
+  mutate(work_desire = ifelse(P5_29 == 1, 1, 0)) %>%
+  select(-P5_29)
+
+
+#Have ever worked ##############################################################
+merged_data <- merged_data %>%
+  mutate(P5_33 = as.numeric(P5_33)) %>%
+  mutate(P5_33 = ifelse(is.na(P5_33), 0, P5_33)) %>%
+  mutate(have_ever_worked = ifelse(P5_33 == 1, 1, 0)) %>%
+  select(-P5_33)
+
+
+#Have children #################################################################
+merged_data <- merged_data %>% rename(children = CT_NHA)
+
+
+#Survey design
+survey_design <- svydesign(ids = ~1, data = merged_data, weights = ~FAC_ELE)
+
+
+
+
+
+```
+
+# Final data cleaning and scaling
+
+```{r}
+# Drop the variables that are not going to be used
+merged_data <- merged_data %>% select(-c( FILTRO5_1, PB_CDISC, PB_C0005, PB_C0617, PB_C60MA, PB_CETEM, LLAVEVIV, LLAVEHOG, nowork_bc_care, neverwork_bc_care )) #########***** definit nowork_bc_care neverwork_bc_care to be included or not
+#Save data cleaned
+#write unscaled data
+write.csv(merged_data, "final_data_m2_unscaled.csv")
+
+#Scale the data
+vars_to_scale <- c( "children", "working_hrs", "month_y_range",  "month_labor_y"  )
+merged_data <- merged_data %>% mutate(across(all_of(vars_to_scale), ~ scale(.)[, 1]))
+#write scaled data
+write.csv(merged_data, "final_data_m2_scaled.csv", row.names = FALSE)
+names(merged_data) <- tolower(names(merged_data))
+```
+
+# Balance of clases in the dependent variable
+
+```{r}
+data_copy <- merged_data %>%
+  mutate(care_label = factor(care, 
+                             levels = c(0, 1, 2, 3, 4), 
+                             labels = c("No Care", "Care Disability", "Care 0-5", "Care 6-17", "Care 60+")))
+
+care_counts <- data_copy %>%
+  count(care_label) %>%
+  mutate(percentage = n / sum(n) * 100,
+         label = paste0(n, " (", round(percentage, 1), "%)"))
+
+ggplot(data_copy, aes(x = care_label)) +
+  geom_bar(fill = "white", color = "black") +
+  geom_text(data = care_counts, aes(x = care_label, y = n, label = label), vjust = -0.5, size = 3) +
+  scale_x_discrete(labels = c("No Care", "Care Disability", "Care 0-5", "Care 6-17", "Care 60+")) +
+  labs(title = "Distribution of Classes of the Dependent Variable", x = "Care Type", y = "Frequency") +
+  theme_minimal()
+```
+
+# Split the data into training and testing sets
+
+```{r}
+#dimension of the data complete and test and train
+#dim(merged_data)
+
+# Split the data into training and testing sets
+set.seed(123)
+trainIndex <- createDataPartition(merged_data$care, p = .7, list = FALSE, times = 1)
+train_data <- merged_data[trainIndex, ]
+test_data <- merged_data[-trainIndex, ]
+
+#Extract weights
+w_train <- train_data$fac_ele
+w_test <- test_data$fac_ele
+
+
+train_data <- train_data %>% select(-fac_ele, -llavemod)
+test_data <- test_data %>% select(-fac_ele, -llavemod)
+
+#See distribution of care variable
+survey_design <- svydesign(ids = ~1, data = merged_data, weights = ~fac_ele)
+#svyhist(~care, survey_design)
+
+# Use SMOTE to balance the classes
+data_smote <- SMOTE(train_data %>% select(-care), train_data$care, K = 4)$data
+train_data_smote <- data_smote
+train_data_smote$care <- data_smote$class
+train_data_smote$class <- NULL
+train_data_smote$care <- as.factor(train_data_smote$care)  
+w_train_smote <- rep(1, nrow(train_data_smote))
+
+
+# Definir X e Y para los conjuntos de entrenamiento y prueba
+
+xtrain <- as.matrix(train_data_smote %>% select(-care))
+ytrain <- train_data_smote$care
+xtest <- as.matrix(test_data %>% select(-care))
+ytest <- test_data$care
+
+
+```
+
+# Ensemble Model  
+
+```{r}
+#  Multinomial
+model_multinom <- cv.glmnet(xtrain, ytrain, family = "multinomial", alpha = 1, weights = w_train_smote)
+pred_multinom <- predict(model_multinom, newx = as.matrix(xtest), s = "lambda.min", type = "response")
+pred_multi_classes <- apply(pred_multinom, 1, which.max) - 1
+#Delete the third dimension if it is 1
+if (length(dim(pred_multinom)) == 3 && dim(pred_multinom)[3] == 1) {
+    pred_multinom <- pred_multinom[, , 1]
+}
+
+
+#  Random Forest
+model_ranger <- ranger(care ~ ., data = train_data_smote, probability = TRUE, case.weights = w_train_smote, importance = 'impurity')
+pred_ranger <- predict(model_ranger, data = xtest)$predictions
+pred_ranger_classes <- apply(pred_ranger, 1, which.max) - 1
+
+
+#  XGBoost
+xtrain <- as.matrix(as.data.frame(lapply(train_data_smote %>% select(-care), as.numeric)))
+dtrain <- xgb.DMatrix(data = xtrain, label = as.numeric(as.character(ytrain)), weight = w_train_smote)
+xtest <- as.matrix(as.data.frame(lapply(test_data %>% select(-care), as.numeric)))
+dtest <- xgb.DMatrix(data = xtest)
+model_xgboost <- xgboost(data = dtrain, nrounds = 100, objective = "multi:softprob", num_class = 5)
+pred_xgboost <- predict(model_xgboost, newdata = dtest)
+print(dim(pred_xgboost))  # Si esto es NULL, entonces es un vector, no una matriz
+num_classes <- 5  # Número de clases
+num_samples <- nrow(xtest)  # Número de muestras en xtest
+# Convertir a matriz si pred_xgboost es un vector
+if (is.null(dim(pred_xgboost))) {
+  pred_xgboost <- matrix(pred_xgboost, ncol = num_classes, byrow = TRUE)
+}
+pred_xgboost_classes <- apply(pred_xgboost, 1, which.max) - 1
+
+
+```
+
+```{r}
+####################################################
+# Check dimensions
+cat("pred_multinom dimensions: ", dim(pred_multinom), "\n")
+cat("pred_ranger dimensions: ", dim(pred_ranger), "\n")
+cat("pred_xgboost dimensions: ", dim(pred_xgboost), "\n")
+
+
+# Change the thresholds for each class
+thresholds <- c(0.8, 0.4, 0.5, 0.3, 0.3)  
+
+# Ensamble the predictions
+if (all(dim(pred_multinom) == dim(pred_ranger)) && all(dim(pred_ranger) == dim(pred_xgboost))) {
+  # Mean
+  predictions <- (pred_multinom + pred_ranger + pred_xgboost) / 3
+  
+  # Apply the thresholds
+  adjusted_predictions <- apply(predictions, 1, function(probabilities) {
+    above_threshold <- probabilities >= thresholds
+    if (any(above_threshold)) {
+      return(which.max(probabilities * above_threshold) - 1)  # select the class with the highest probability
+    } else {
+      return(NA)  
+    }
+  })
+  
+  predicted_classes <- adjusted_predictions
+} else {
+  stop("Not matching dimensions.")
+}
+
+
+```
+
+#Individual model evaluation
+
+```{r}
+
+# GLMNET  evaluation
+confusion_glmnet <- confusionMatrix(as.factor(pred_multi_classes), as.factor(ytest))
+ytest <- factor(ytest)
+# AUC multiclass
+roc_multinom <- multiclass.roc(ytest, pred_multinom)
+auc_multinom <- auc(roc_multinom)
+f1_glmnet <- F1_Score(ytest, pred_multi_classes)
+
+# Ranger evaluation
+confusion_ranger <- confusionMatrix(as.factor(pred_ranger_classes), as.factor(ytest))
+roc_ranger <- multiclass.roc(ytest, pred_ranger)
+auc_ranger <- auc(roc_ranger)
+f1_ranger <- F1_Score(ytest, pred_ranger_classes)
+
+
+#  XGBoost  evaluation
+colnames(pred_xgboost) <- levels(ytest) #to make sure the columns are in the right order
+
+confusion_xgboost <- confusionMatrix(as.factor(pred_xgboost_classes), as.factor(ytest))
+roc_xgboost <- multiclass.roc(ytest, pred_xgboost)
+auc_xgboost <- auc(roc_xgboost)
+f1_xgboost <- F1_Score(ytest, pred_xgboost_classes)
+
+# Print the results
+print(paste("GLM AUC:", auc_multinom))
+print(paste("Ranger AUC:", auc_ranger))
+print(paste("XGBoost AUC:", auc_xgboost))
+
+print(paste("GLM F1 Score:", f1_glmnet))
+print(paste("Ranger F1 Score:", f1_ranger))
+print(paste("XGBoost F1 Score:", f1_xgboost))
+
+```
+# Model Evaluation
+
+```{r}
+# Model evaluation with caret
+confusion_matrix <- confusionMatrix(as.factor(predicted_classes), as.factor(ytest))
+confusion_matrix
+#F1 score
+f1_score <- F1_Score(ytest, predicted_classes, positive = 1)
+cat("F1 score: ", f1_score, "\n")
+# Estimate AUC and ROC curve for each class
+auc_values <- sapply(0:4, function(class) {
+  roc_curve <- roc(as.numeric(ytest == class), as.numeric(predictions[, class + 1]))
+  auc(roc_curve)
+})
+
+print(paste("AUC values for each class:", auc_values))
+```
+
+# Multi-ROC curve (1st)
+```{r}
+#MultiROC_Curve
+roc_multiclass <- multiclass.roc(ytest, predictions)
+colors <- rainbow(length(unique(ytest))) # colors for the roc curves
+class_labels <- as.character(unique(ytest)) # class labels
+roc_curves <- list() # to store individual roc curves
+#Extract the roc curves from the multiclass roc object
+for (roc_pair in roc_multiclass$rocs) {
+  for (roc in roc_pair) {
+    if (inherits(roc, "roc")) {
+      roc_curves <- append(roc_curves, list(roc))
+    }
+  }
+}
+
+#Plot 
+# Save ROC curve
+png(filename = "Multiclass_ROC_Curve.png", width = 800, height = 600)
+plot(roc_curves[[1]], col = colors[1], lwd = 2, main = "Multiclass ROC Curve")
+for (i in 2:length(roc_curves)) {
+  plot(roc_curves[[i]], col = colors[i], lwd = 2, add = TRUE)}
+legend("bottomright", legend = class_labels, col = colors, lwd = 2)
+dev.off()
+
+```
+
+#Multinomial intepretation
+
+```{r}
+
+# Get multinomial coefficients
+coefmulti <- coef(model_multinom, s = "lambda.min")
+odds_ratios_list <- list() #create a list to store the odds ratios for each class
+#loop to extract, convert and store each coefficient matrix
+for (i in 1:length(coefmulti)) {
+  coef_dense <- as.matrix(coefmulti[[i]]) #turn the sparse matrix into a dense matrix
+    odds_ratios <- exp(coef_dense) #estimate odds ratios
+    odds_ratios_df <- as.data.frame(odds_ratios)
+    odds_ratios_df$Variable <- rownames(odds_ratios_df)
+    colnames(odds_ratios_df)[1] <- paste0("Class_", i - 1)
+    odds_ratios_list[[i]] <- odds_ratios_df
+}
+
+combined_odds_ratios_df <- Reduce(function(x, y) merge(x, y, by = "Variable"), odds_ratios_list)
+combined_odds_ratios_df <- combined_odds_ratios_df[, c("Variable", paste0("Class_", 0:4))]
+print(combined_odds_ratios_df)
+
+#save
+#write.csv(combined_odds_ratios_df, "odds_ratios_multinom.csv", row.names = TRUE)
+
+```
+
+```{r}
+
+coef_multi <- coef(model_multinom, s = "lambda.min")
+coef_list <- lapply(1:length(coef_multi), function(i) {
+  coef_df <- as.data.frame(as.matrix(coef_multi[[i]]))
+  coef_df$term <- rownames(coef_df)
+  coef_df$class <- paste0("Class_", i)
+  coef_df
+})
+
+# combine the data frames
+coef_df <- bind_rows(coef_list) %>%
+  rename(estimate = 1) %>%
+  filter(term != "(Intercept)")
+
+
+# plot
+ggplot(coef_df, aes(x = estimate, y = term, color = class)) +
+  geom_point() +
+  facet_wrap(~ class, scales = "free_x") +
+  labs(title = "Odds Ratios - Multinomial Model", x = "Odds Ratio (log scale)", y = "Variables") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave("odds_ratios_multinom.png", width = 15, height = 16)
+
+
+```
+
+
+# Random Forest and XGBoost variable importance
+
+```{r}
+#variable importance
+importance_ranger <- importance(model_ranger)
+importance_xgboost <- xgb.importance(model = model_xgboost)
+importance_xgboost 
+```
+
+
+
+```{r}
+#Save models
+#saveRDS(model_multinom, "model_multinom.rds")
+#saveRDS(model_ranger, "model_ranger.rds")
+#saveRDS(model_xgboost, "model_xgboost.rds")
+```
+
+
+# Extension of the model by eliminating class 0 
+
+```{r}
+# merged_data <- merged_data %>% filter(care != 0)
+# merged_data <- merged_data %>% filter(care != 0)
+# ```
+# 
+# ```{r}
+# data_copy <- merged_data %>%
+#   mutate(care_label = factor(care, 
+#                              levels = c(0, 1, 2, 3), 
+#                              labels = c("Care Disability", "Care 0-5", "Care 6-17", "Care 60+")))
+# 
+# care_counts <- data_copy %>%
+#   count(care_label) %>%
+#   mutate(percentage = n / sum(n) * 100,
+#          label = paste0(n, " (", round(percentage, 1), "%)"))
+# 
+# ggplot(data_copy, aes(x = care_label)) +
+#   geom_bar(fill = "#005f73") +
+#   geom_text(data = care_counts, aes(x = care_label, y = n, label = label), vjust = -0.5, size = 3) +
+#   scale_x_discrete(labels = c("Care Disability", "Care 0-5", "Care 6-17", "Care 60+")) +
+#   labs(title = "Distribution of Classes of the Dependent Variable", x = "Care Type", y = "Frequency") +
+#   theme_minimal()
+# ```
+# 
+# 
+# # Ensemble Model  
+# 
+# ```{r}
+# colnames(merged_data)
+# # Split the data into training and testing sets
+# set.seed(123)
+# trainIndex <- createDataPartition(merged_data$care, p = .7, list = FALSE, times = 1)
+# train_data <- merged_data[trainIndex, ]
+# test_data <- merged_data[-trainIndex, ]
+# 
+# #Extract weights
+# w_train <- train_data$fac_ele
+# w_test <- test_data$fac_ele
+# 
+# train_data <- train_data %>% select(-fac_ele, -llavemod)
+# test_data <- test_data %>% select(-fac_ele, -llavemod)
+# 
+# #See distribution of care variable
+# survey_design <- svydesign(ids = ~1, data = merged_data, weights = ~fac_ele)
+# #svyhist(~care, survey_design)
+# 
+# # Use SMOTE to balance the classes
+# data_smote <- SMOTE(train_data %>% select(-care), train_data$care, K = 4)$data
+# train_data_smote <- data_smote
+# train_data_smote$care <- data_smote$class
+# train_data_smote$class <- NULL
+# train_data_smote$care <- as.factor(train_data_smote$care)  
+# w_train_smote <- rep(1, nrow(train_data_smote))
+# 
+# 
+# # Definir X e Y para los conjuntos de entrenamiento y prueba
+# xtrain <- train_data_smote %>% select(-care)
+# ytrain <- train_data_smote$care
+# xtest <- test_data %>% select(-care)
+# ytest <- test_data$care
+# 
+# 
+# ```
+# 
+# ## NOTE: By eliminating class 0, we need to adjust the indexes for xgboost
+# # It also needs to adjunts # of classes and columns when predicting (see below)
+# 
+# ```{r}
+# ytrain <- as.numeric(as.character(train_data_smote$care)) - 1 # Adjust the index when eliminating class 0 Important. 
+# ytest <- as.numeric(as.character(test_data$care)) - 1 # Adjust the index when eliminating class 0. important
+# ```
+# #Model Predictions
+# 
+# ```{r}
+# #  Multinomial
+# model_multinom <- multinom(care ~ ., data = train_data_smote, weights = w_train_smote)
+# pred_multinom <- predict(model_multinom, newdata = xtest, type = "probs")
+# 
+# #  Random Forest
+# model_ranger <- ranger(care ~ ., data = train_data_smote, probability = TRUE, case.weights = w_train_smote, importance = 'impurity')
+# pred_ranger <- predict(model_ranger, data = xtest)$predictions
+# 
+# #  XGBoost
+# xtrain <- as.matrix(as.data.frame(lapply(train_data_smote %>% select(-care), as.numeric)))
+# dtrain <- xgb.DMatrix(data = xtrain, label = as.numeric(as.character(ytrain)), weight = w_train_smote)
+# xtest <- as.matrix(as.data.frame(lapply(test_data %>% select(-care), as.numeric)))
+# dtest <- xgb.DMatrix(data = xtest)
+# model_xgboost <- xgboost(data = dtrain, nrounds = 100, objective = "multi:softprob", num_class = 4)
+# pred_xgboost <- predict(model_xgboost, newdata = dtest)
+# pred_xgboost <- matrix(pred_xgboost, ncol = 4, byrow = TRUE)
+# 
+# # Check dimensions
+# cat("pred_multinom dimensions: ", dim(pred_multinom), "\n")
+# cat("pred_ranger dimensions: ", dim(pred_ranger), "\n")
+# cat("pred_xgboost dimensions: ", dim(pred_xgboost), "\n")
+# 
+# # Ensable the predictions
+# if (all(dim(pred_multinom) == dim(pred_ranger)) && all(dim(pred_ranger) == dim(pred_xgboost))) {
+#   predictions <- (pred_multinom + pred_ranger + pred_xgboost) / 3
+#   predicted_classes <- apply(predictions, 1, which.max) - 1  # Restar 1 para ajustar el índice
+# } else {
+#   stop("Not matching dimensions.")}
+# ```
+# 
+# 
+# ```{r}
+# # Model evaluation with caret
+# confusion_matrix <- confusionMatrix(factor(predicted_classes), factor(ytest))
+# confusion_matrix
+# #F1 score
+# f1_score <- F1_Score(ytest, predicted_classes, positive = 1)
+# # Estimate AUC and ROC curve for each class
+# auc_values <- sapply(0:3, function(class) {
+#   roc_curve <- roc(as.numeric(ytest == class), as.numeric(predictions[, class + 1]))
+#   auc(roc_curve)
+# })
+# 
+# print(paste("AUC values for each class:", auc_values))
+# 
+# # Plot correlation matrix
+# cor_matrix <- cor(train_data)
+# ggcorrplot(cor_matrix, hc.order = TRUE, type = "lower", lab = FALSE, method = "square", 
+#            title = "Correlation plot of variables",
+#            colors = c("#6D9EC1", "white", "#E46726")) +
+#   theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 8),
+#         axis.text.y = element_text(size = 7))
+# ```
+# 
+# #Multinomial coefficients
+# ```{r}
+# coef(model_multinom)
+# exp(coef(model_multinom))
+# ```
+# 
+# # Multi-ROC curve (1st)
+# ```{r}
+# #MultiROC_Curve
+# roc_multiclass <- multiclass.roc(ytest, predictions)
+# colors <- rainbow(length(unique(ytest))) # colors for the roc curves
+# class_labels <- as.character(unique(ytest)) # class labels
+# roc_curves <- list() # to store individual roc curves
+# #Extract the roc curves from the multiclass roc object
+# for (roc_pair in roc_multiclass$rocs) {
+#   for (roc in roc_pair) {
+#     if (inherits(roc, "roc")) {
+#       roc_curves <- append(roc_curves, list(roc))
+#     }
+#   }
+# }
+# 
+# #Plot 
+# plot(roc_curves[[1]], col = colors[1], lwd = 2, main = "Multiclass ROC Curve")
+# for (i in 2:length(roc_curves)) {
+#   plot(roc_curves[[i]], col = colors[i], lwd = 2, add = TRUE)}
+# legend("bottomright", legend = class_labels, col = colors, lwd = 2)
+
+
+```
