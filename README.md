@@ -8,4 +8,4 @@ This repository contains the Supplemental scripts for MY4982024 submision. The r
 
 All tasks are fully automated, and no modifications to paths are required for execution. Some scripts will generate outputs that are subsequently used as inputs for other scripts, and the directories have been organized in the correct order to facilitate this workflow. 
 
-Any comments or issues, please [open an issue](https://github.com/MY498/issues).
+Any comments or issues, please [open an issue](https://github.com/MichellePapadakis/MY498/issues).
