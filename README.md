@@ -1,6 +1,6 @@
 # MY498 Supplemental materials
 
-This repository contains the Supplemental scripts for MY4982024 submision. The repository is organized into two main directories:
+This repository contains the supplemental materials for MY4982024 submision. The repository is organized into two main directories:
 
 - **models**: This directory includes the four models used in the analysis. Each model is designed to run independently, using relative paths and automation for downloading microdata. Additionally, SQLite is used to optimize data management. The models are executed separately.
 
