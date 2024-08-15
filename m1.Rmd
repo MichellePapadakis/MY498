@@ -1,0 +1,673 @@
+---
+title: "Model 1"
+author: "Michelle Papadakis"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  pdf_document:
+    latex_engine: xelatex
+    toc: false
+    toc_depth: 2
+    keep_tex: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Clean the environment
+```{r}
+rm(list=ls())
+```
+
+#Libraries loading
+```{r}
+#if package is not installed: install.packages("pacman")
+pacman::p_load(tidyverse, RSQLite, DBI, readr, downloader, nnet, caTools, caret, SuperLearner, 
+               MLmetrics, pROC, ranger, glmnet, xgboost, ggcorrplot, DescTools, factoextra, survey, smotefamily)
+```
+
+#Data Fetching
+```{r, include=FALSE}
+# Function to download and unzip data
+download_and_unzip_data <- function(url, zip_file, unzip_dir) {
+  download.file(url, destfile = zip_file, mode = "wb")
+  unzip(zip_file, exdir = unzip_dir)
+}
+
+# Function to read CSV files and store them in an SQLite database
+read_and_store <- function(db_conn, table_name, file_path) {
+  data <- read_csv(file_path)
+  dbWriteTable(db_conn, table_name, data, overwrite = TRUE)
+}
+
+main <- function() {
+  # Function inputs
+  url <- "https://www.inegi.org.mx/contenidos/programas/enasic/2022/microdatos/enasic_2022_bd_csv.zip"
+  zip_file <- tempfile()
+  unzip_dir <- tempdir()
+  
+  # Download and unzip the dataset
+  download_and_unzip_data(url, zip_file, unzip_dir)
+  
+  # Create SQLite database and connection
+  db_path <- tempfile(fileext = ".sqlite")
+  db_conn <- dbConnect(SQLite(), db_path)
+  
+  # Read and store datasets in the database
+  read_and_store(db_conn, "tpob_cui", file.path(unzip_dir, "TPOB_CUI.csv"))
+  read_and_store(db_conn, "thogar", file.path(unzip_dir, "THOGAR.csv"))
+  read_and_store(db_conn, "tper_ele", file.path(unzip_dir, "TPER_ELE.csv"))
+  
+query <- "
+  SELECT tper_ele.LLAVEVIV, tper_ele.LLAVEHOG, tper_ele.LLAVEMOD, tper_ele.FAC_ELE, tper_ele.EDAD, 
+         tper_ele.SEXO, tper_ele.COND_DISC, tper_ele.P5_2, tper_ele.P5_4, tper_ele.P5_11, tper_ele.CT_NHA,
+         tper_ele.P5_11A, tper_ele.NIVEL, tper_ele.FILTRO5_1, tper_ele.FILTRO5_2, tper_ele.CPEA, tper_ele.P5_13, tper_ele.P5_6, 
+         tper_ele.P5_10_4, tper_ele.P5_10_6, tper_ele.P5_29, tper_ele.P5_32, tper_ele.P5_33, tper_ele.P5_34,
+         tpob_cui.PB_CDISC, tpob_cui.PB_C0005, tpob_cui.PB_C0617, tpob_cui.PB_C60MA, 
+         tpob_cui.PB_CETEM, thogar.P3A_3_1, thogar.P3A_3_2, thogar.P3A_3_3, thogar.P3A_3_4, thogar.P2_4_2, 
+         thogar.P3A_3_5, thogar.P3A_3_6, thogar.P3A_3_7, thogar.P3A_5, thogar.P2_4_1, 
+         thogar.P2_4_3, thogar.P2_4_4
+  FROM tper_ele
+  LEFT JOIN tpob_cui ON tper_ele.LLAVEVIV = tpob_cui.LLAVEVIV AND tper_ele.LLAVEHOG = tpob_cui.LLAVEHOG AND tper_ele.LLAVEMOD = tpob_cui.LLAVEMOD
+  LEFT JOIN thogar ON tper_ele.LLAVEVIV = thogar.LLAVEVIV AND tper_ele.LLAVEHOG = thogar.LLAVEHOG
+"
+  # Execute the query and retrieve the merged data
+  merged_data <- dbGetQuery(db_conn, query)
+  
+  # Close the database connection
+  dbDisconnect(db_conn)
+  
+  return(merged_data)
+}
+
+# Call main function
+df <- main()
+
+merged_data <- df
+
+
+
+
+```
+
+#Extra functions
+```{r}
+# Function to recode binary variables
+recode_binary <- function(data, variable, na_value = 0) {
+  data %>%
+    mutate({{ variable }} := ifelse(is.na({{ variable }}), na_value, ifelse({{ variable }} == 1, 1, 0)))
+}
+
+# Function to convert to numeric and scale variables
+convert_and_scale <- function(data, var) {
+  data %>%
+    mutate({{ var }} := as.numeric(as.character({{ var }}))) %>%
+    mutate({{ var }} := scale({{ var }}))
+}
+
+#Function to one hot encode 
+one_hot_encode <- function(data, column_name) {
+  data[[column_name]] <- as.factor(data[[column_name]])
+  #Excluding the first level
+  dummies <- dummyVars(formula = as.formula(paste0("~ ", column_name)), data = data, fullRank = TRUE)
+  dummy_data <- predict(dummies, newdata = data)
+  data <- cbind(data, dummy_data)
+  data[[column_name]] <- NULL
+  return(data)
+}
+
+```
+
+#Data pre-processing
+
+```{r}
+# Sex ##########################################################################
+merged_data <- merged_data %>%
+  mutate(SEXO = ifelse(SEXO == 1, 0, 1)) %>% #1 end up as women
+  rename(sex = SEXO)
+
+# Economic active ##############################################################
+merged_data <- merged_data %>%
+  mutate(CPEA = ifelse(CPEA == 1, 1, 0)) %>%
+  rename(economic_active = CPEA)
+
+#  care ##########################################################################
+merged_data <- merged_data %>%
+  mutate(across(starts_with("PB_"), ~ as.numeric(.))) %>%
+  mutate(across(starts_with("PB_"), ~ replace_na(., 0))) %>%
+  mutate(care = ifelse(rowSums(select(., starts_with("PB_")), na.rm = TRUE) > 0, 1, 0)) %>%
+  select(-starts_with("PB_"))
+
+# Monthly income range  ########################################################
+merged_data <- merged_data %>%
+  mutate(P3A_5 = as.numeric(P3A_5)) %>%
+  rename(month_y_range = P3A_5) %>%
+  filter(month_y_range != 99) # Discard the not specified income range 
+   
+# Labor income #################################################################
+merged_data <- merged_data %>%
+  mutate(P5_11 = as.numeric(P5_11)) %>%
+  mutate(P5_11A = as.numeric(P5_11A)) %>%
+  mutate(P5_11 = ifelse(is.na(P5_11), 0, P5_11)) %>%
+  mutate(P5_11A = ifelse(is.na(P5_11A), 0, P5_11A)) 
+merged_data <- merged_data %>% filter(P5_11 != 99888) 
+merged_data <- merged_data %>%
+  mutate(month_labor_y = case_when(
+    P5_11A == 1 ~ P5_11 * 4,  # weekly
+    P5_11A == 2 ~ P5_11 * 2,  # biweekly
+    P5_11A == 3 ~ P5_11 * 1,  # monthly
+    P5_11A == 4 ~ P5_11 / 12, # yearly
+    TRUE ~ 0
+  ))
+  merged_data <- merged_data %>% select (c(-P5_11, -P5_11A))
+  
+# Full time workers (>= 35 hrs x week INEGI)  ##################################
+merged_data <- merged_data %>%
+  mutate(FILTRO5_1 = ifelse(is.na(FILTRO5_1), 0, FILTRO5_1)) %>%
+  mutate(fulltime_work = ifelse(FILTRO5_1 == 2, 1, 0)) 
+
+# Subordinate ##################################################################
+merged_data <- merged_data %>%
+  mutate(FILTRO5_2 = ifelse(is.na(FILTRO5_2), 0, FILTRO5_2)) %>%
+  mutate(subord = ifelse(FILTRO5_2 == 1, 1, 0)) 
+  merged_data <- merged_data %>% select (-FILTRO5_2) 
+
+  
+# Work hours per week  #########################################################
+merged_data <- merged_data %>%
+  mutate(P5_13 = as.numeric(P5_13)) %>%
+  mutate (P5_13 = ifelse(P5_13 == 99, 0, P5_13)) %>%
+  mutate(P5_13 = ifelse(is.na(P5_13), 0, P5_13)) %>%
+  rename(working_hrs = P5_13)
+  
+
+# Education level  #############################################################
+merged_data <- merged_data %>% filter(NIVEL != 9)
+#rename to level
+merged_data <- merged_data %>% rename(level = NIVEL)
+merged_data <- one_hot_encode(merged_data, "level")
+
+
+# Disability  ##################################################################
+merged_data <- merged_data %>%
+  mutate(COND_DISC = ifelse(COND_DISC == 1, 1,0)) %>%
+  rename(disability = COND_DISC)
+
+
+# Mariatal status  #############################################################
+merged_data <- merged_data %>%
+  mutate(P5_2 = case_when(
+    P5_2 == 1 ~ 2, # living together
+    P5_2 == 2 ~ 3, # separated
+    P5_2 == 3 ~ 4, # divorced
+    P5_2 == 4 ~ 5, # widowed
+    P5_2 == 5 ~ 6, # married
+    P5_2 == 6 ~ 1, # Single taken as reference
+    TRUE ~ P5_2  
+  )) %>%
+  rename(marital_status = P5_2)
+
+merged_data <- one_hot_encode(merged_data, "marital_status")
+
+
+
+# Indigenous ###################################################################
+merged_data <- merged_data %>%
+  mutate(P5_4 = as.numeric(P5_4)) %>%
+  mutate(P5_4 = ifelse(P5_4 == 1, 1, 0)) %>%
+  rename(indigenous = P5_4) #If the don´t now, we assume they are not 
+
+
+# Have social security #########################################################
+merged_data <- merged_data %>%
+  mutate(have_ss = ifelse(is.na(P5_10_6), 0,ifelse(P5_10_6 == 1, 1, 0)))
+  merged_data <- merged_data %>% select(-P5_10_6)
+
+
+# Have child care access #######################################################
+merged_data <- merged_data %>%
+  mutate(have_care_ss = ifelse(is.na(P5_10_4), 0, ifelse(P5_10_4 == 1, 1, 0))) 
+  merged_data <- merged_data %>% select(-P5_10_4) 
+  
+# Activities ###################################################################
+merged_data <- merged_data %>%
+  mutate(P5_6 = ifelse(is.na(P5_6), 0, P5_6)) %>%
+  mutate(act_housework = ifelse(P5_6 == 6, 1, 0)) %>%
+  mutate(act_retired = ifelse(P5_6 == 4, 1, 0)) %>%
+  mutate(act_student = ifelse(P5_6 == 5, 1, 0)) 
+  merged_data <- merged_data %>% select(-P5_6) 
+
+# Having children as a reason for not working ##################################
+merged_data <- merged_data %>%
+  mutate(P5_32 = as.numeric(P5_32)) %>%
+  mutate(P5_32 = ifelse(is.na(P5_32), 0, P5_32)) %>% 
+  mutate(nowork_bc_care = ifelse(P5_32 == 7, 1, 0), )
+  merged_data <- merged_data %>% select(-P5_32)
+
+
+# Having care responsibilities as a reason for never worked ####################
+merged_data <- merged_data %>%
+  mutate(P5_34 = ifelse(is.na(P5_34), 0, P5_34)) %>%
+  mutate(neverwork_bc_care = ifelse(P5_34 == 3 | P5_34 == 4, 1, 0))
+  merged_data <- merged_data %>% select (-P5_34) 
+
+
+
+# Hire of external workers  ####################################################
+merged_data <- merged_data %>%
+  mutate(P2_4_1 = ifelse(is.na(P2_4_1), 0, P2_4_1)) %>%
+  mutate(P2_4_2 = ifelse(is.na(P2_4_2), 0, P2_4_2)) %>%
+  mutate(P2_4_3 = ifelse(is.na(P2_4_3), 0, P2_4_3)) %>%
+  mutate(P2_4_4 = ifelse(is.na(P2_4_4), 0, P2_4_4)) %>%
+  mutate(external_workers = ifelse(P2_4_1 == 1 | 
+                                   P2_4_2 == 1 | 
+                                   P2_4_3 == 1 | P2_4_4 == 1, 1, 0)) %>%
+  select(-P2_4_1, -P2_4_2, -P2_4_3, -P2_4_4)
+
+
+
+# Age range ####################################################################
+merged_data <- merged_data %>%
+  filter(EDAD != 98) %>%
+  mutate(EDAD = as.numeric(EDAD)) %>%
+  mutate(age_range = case_when(
+    EDAD >= 15 & EDAD < 18 ~ 1,
+    EDAD >= 18 & EDAD < 30 ~ 2,
+    EDAD >= 30 & EDAD < 40 ~ 3,
+    EDAD >= 40 & EDAD < 50 ~ 4,
+    EDAD >= 50 & EDAD < 60 ~ 5,
+    EDAD >= 60 ~ 6
+  )) %>%
+  select(-EDAD) 
+
+merged_data <- one_hot_encode(merged_data, "age_range")
+
+# Goverment transfer  ##########################################################
+merged_data <- merged_data %>%
+  mutate(across(starts_with("P3A_3"), ~ifelse(. == 1, 1, 0))) %>%
+  rename(govt_mother_child = P3A_3_1) %>%
+  rename(govt_basic_edu = P3A_3_2) %>%
+  rename(govt_high_school = P3A_3_3) %>%
+  rename(govt_youth_employment = P3A_3_4) %>%
+  rename(govt_disability_pension = P3A_3_5) %>%
+  rename(govt_pension = P3A_3_6) %>%
+  rename(govt_women_insurance = P3A_3_7)
+
+
+# Work desire ##################################################################
+merged_data <- merged_data %>%
+  mutate(P5_29 = as.numeric(P5_29)) %>%
+  mutate(P5_29 = ifelse(is.na(P5_29), 0, P5_29)) %>%
+  mutate(work_desire = ifelse(P5_29 == 1, 1, 0)) %>%
+  select(-P5_29)
+
+
+#Have ever worked ##############################################################
+merged_data <- merged_data %>%
+  mutate(P5_33 = as.numeric(P5_33)) %>%
+  mutate(P5_33 = ifelse(is.na(P5_33), 0, P5_33)) %>%
+  mutate(have_ever_worked = ifelse(P5_33 == 1, 1, 0)) %>%
+  select(-P5_33)
+
+
+#Have children #################################################################
+merged_data <- merged_data %>% rename(children = CT_NHA)
+
+#Survey design
+survey_design <- svydesign(ids = ~1, data = merged_data, weights = ~FAC_ELE)
+
+```
+
+# Final data cleaning and scaling
+
+```{r}
+# Drop the variables that are not going to be used
+merged_data <- merged_data %>% select(-c( FILTRO5_1, LLAVEVIV, LLAVEHOG, nowork_bc_care, neverwork_bc_care  ))
+
+#Save data cleaned
+write.csv(merged_data, "final_data_m1_unscaled.csv", row.names = FALSE)
+
+#Scale the data
+vars_to_scale <- c( "children", "working_hrs", "month_y_range",  "month_labor_y")
+merged_data <- merged_data %>% mutate(across(all_of(vars_to_scale), ~ scale(.)[, 1]))
+
+#Save data scaled
+write.csv(merged_data, "final_data_m1_scaled.csv", row.names = FALSE)
+```
+
+# Balance of clases in the dependent variable
+
+```{r}
+
+data_copy <- merged_data %>%
+  mutate(care_label = factor(care, levels = c(0, 1), labels = c("No Care", "Care")))
+
+care_counts <- data_copy %>%
+  count(care_label) %>%
+  mutate(percentage = n / sum(n) * 100,
+         label = paste0(n, " (", round(percentage, 1), "%)"))
+
+ggplot(data_copy, aes(x = care_label)) +
+  geom_bar(fill = "white", color = "black") +  
+  geom_text(data = care_counts, aes(x = care_label, y = n, label = label), vjust = -0.5, size = 3) +
+  scale_x_discrete(labels = c("No Care", "Care")) +
+  labs(title = "Distribution of Classes of the Dependent Variable", x = "Care", y = "Frequency") +
+  theme_minimal()
+
+
+#guardar base en csv
+write.csv(merged_data, "final_data_m1.csv")
+names(merged_data) <- tolower(names(merged_data))
+```
+
+
+# Split the data into training and testing sets
+
+```{r}
+# Split data into training and testing sets
+set.seed(123)
+trainIndex <- createDataPartition(merged_data$care, p = .8, list = FALSE, times = 1)
+train_data <- merged_data[trainIndex, ]
+test_data <- merged_data[-trainIndex, ]
+
+# Separate expansion factor
+w_train <- train_data$fac_ele
+w_test <- test_data$fac_ele
+
+train_data <- train_data %>% select(-fac_ele, -llavemod)
+test_data <- test_data %>% select(-fac_ele, - llavemod)
+
+# Define independent (X) and dependent (Y) variables
+xtrain <- train_data %>% select(-care)
+ytrain <- train_data$care
+xtest <- test_data %>% select(-care)
+ytest <- test_data$care
+
+```
+
+# Ensemble Model  
+
+```{r}
+
+
+# GLM model with regularization and weights
+cv_glmnet <- cv.glmnet(as.matrix(xtrain), ytrain, alpha = 1, family = "binomial", weights = w_train)
+model_glmnet <- glmnet(as.matrix(xtrain), ytrain, alpha = 1, lambda = cv_glmnet$lambda.min, family = "binomial", weights = w_train)
+pred_glmnet <- predict(model_glmnet, newx = as.matrix(xtest), type = "response")
+pred_glmnet_classes <- ifelse(pred_glmnet > 0.4, 1, 0)
+
+
+# Ranger model with weights
+model_ranger <- ranger(care ~ ., data = train_data, probability = TRUE, case.weights = w_train, importance = 'impurity')
+pred_ranger <- predict(model_ranger, data = xtest)$predictions[, 2] 
+pred_ranger_classes <- ifelse(pred_ranger > 0.4, 1, 0)
+importance_ranger <- importance(model_ranger)
+
+# XGBoost model with weights
+xtrain <- as.matrix(as.data.frame(lapply(xtrain, as.numeric)))
+dtrain <- xgb.DMatrix(data = as.matrix(xtrain), label = ytrain, weight = w_train)
+model_xgboost <- xgboost(data = dtrain, nrounds = 100, objective = "binary:logistic")
+dtest <- xgb.DMatrix(data = as.matrix(xtest))
+pred_xgboost <- predict(model_xgboost, newdata = dtest)
+pred_xgboost_classes <- ifelse(pred_xgboost > 0.4, 1, 0)
+
+# Average predictions from base models
+predictions <- (pred_glmnet + pred_ranger + pred_xgboost) / 3
+predicted_classes <- ifelse(predictions > 0.4, 1, 0)
+
+# Save models
+saveRDS(model_glmnet, "model_glmnet.rds")
+#saveRDS(model_ranger, "model_ranger.rds")
+#saveRDS(model_xgboost, "model_xgboost.rds")
+
+```
+
+# Model Evaluation
+
+```{r}
+# Plot correlation matrix
+cor_matrix <- cor(train_data)
+ggcorrplot(cor_matrix, hc.order = TRUE, type = "lower", lab = FALSE, method = "square", 
+           title = "Correlation plot of variables",
+           colors = c("#415a77", "white", "#9a031e")) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 8),
+        axis.text.y = element_text(size = 7))
+
+
+```
+
+```{r}
+
+# ConfMat with caret
+confusion <- confusionMatrix(as.factor(predicted_classes), as.factor(ytest))
+print(confusion)
+
+# F1 Score
+f1_score <- F1_Score(ytest, predicted_classes)
+print(paste("F1 Score:", f1_score, "\n"))
+
+# ROC curve and AUC
+roc_curve <- roc(as.numeric(ytest), as.numeric(predictions))
+auc_value <- auc(roc_curve)
+print(paste("AUC:", auc_value, "\n"))
+# Plot ROC curve
+plot(roc_curve, col = "#415a77", lwd = 2, main = "ROC curve - Model 1")
+legend("bottomright", legend = paste("AUC =", round(auc_value, 2)), col = "#415a77", lty = 1, lwd = 2)
+
+# Save ROC curve
+png("roc_curve_model1.png")
+plot(roc_curve, col = "#415a77", lwd = 2, main = "ROC curve - Model 1")
+legend("bottomright", legend = paste("AUC =", round(auc_value, 2)), col = "#415a77", lty = 1, lwd = 2)
+dev.off()
+
+```
+
+
+#Variable importance
+#on ranger and xgboost models
+```{r}
+
+# Variable importance in ranger model
+importance_ranger <- importance(model_ranger)
+importance_df <- as.data.frame(importance_ranger)
+importance_df$Variable <- rownames(importance_df)
+importance_df <- importance_df[order(-importance_df$importance_ranger), ]
+top5_importance_ranger <- head(importance_df, 5)
+print(top5_importance_ranger)
+
+# Variable importance in xgboost model
+importance_xgboost <- xgb.importance(model = model_xgboost)
+importance_xgboost <- as.data.frame(importance_xgboost)
+importance_xgboost <- importance_xgboost[order(-importance_xgboost$Gain), ]
+top5_importance_xgboost <- head(importance_xgboost, 5)
+print(top5_importance_xgboost)
+
+```
+# on glmnet model
+
+```{r}
+
+coef_glmnet <- coef(model_glmnet, s = "lambda.min")
+print(coef_glmnet)
+
+# Convertir los coeficientes a un data frame y mantener los nombres
+coef_glmnet_df <- as.data.frame(as.matrix(coef_glmnet))
+colnames(coef_glmnet_df) <- "Coefficient"
+
+# Calcular los odds ratios y añadir como nueva columna
+coef_glmnet_df$OddsRatio <- exp(coef_glmnet_df$Coefficient)
+print(coef_glmnet_df)
+
+```
+#Bootstrap confidence intervals
+
+```{r}
+n_boot <- 1000
+set.seed(123) 
+#Matrix to store the coefficients of the bootstrap samples
+boot_coefs <- matrix(NA, nrow = n_boot, ncol = length(coef_glmnet))
+
+# Adjust the glmnet model using the training set
+for (i in 1:n_boot) {
+  # Create a bootstrap sample from the training set
+  boot_idx <- sample(1:nrow(xtrain), replace = TRUE)
+  xtrain_boot <- xtrain[boot_idx, ]
+  ytrain_boot <- ytrain[boot_idx]
+  w_train_boot <- w_train[boot_idx]
+
+  # Adjust a glmnet model using the bootstrap sample
+  model_boot <- glmnet(as.matrix(xtrain_boot), ytrain_boot, alpha = 1, lambda = cv_glmnet$lambda.min, family = "binomial", weights = w_train_boot)
+  
+  # Extract the coefficients and store them in the matrix
+  boot_coefs[i, ] <- as.numeric(coef(model_boot, s = "lambda.min"))
+}
+
+#Estimate confidence intervals of the coefficients at 95%
+
+lower_percentile <- 0.025
+upper_percentile <- 0.975
+lower_ci <- apply(boot_coefs, 2, function(x) quantile(x, probs = lower_percentile))
+upper_ci <- apply(boot_coefs, 2, function(x) quantile(x, probs = upper_percentile))
+
+# Turn the confidence intervals into odds ratios
+coef_glmnet_df$LowerCI <- exp(lower_ci)
+coef_glmnet_df$UpperCI <- exp(upper_ci)
+
+#print(coef_glmnet_df)
+```
+
+```{r}
+#pre-process the data to plot the odds ratios
+coef_glmnet_df$Category <- rownames(coef_glmnet_df)#Get the names of the variables
+coef_glmnet_df <- coef_glmnet_df[-1, ] #eliminar intercept
+
+```
+
+```{r}
+#plot odds ratios
+p <-ggplot(coef_glmnet_df, aes(x = OddsRatio, y = rownames(coef_glmnet_df))) +
+  geom_point(aes(colour = 'Estimate'), size = .6) + # Cambiar tamaño de puntos
+  geom_errorbarh(aes(xmin = LowerCI, xmax = UpperCI, colour = 'Confidence Interval'), size = 0.2, linetype = 1, height = 0.2) + # Ajustar barras de error
+  geom_vline(aes(xintercept = 1), linetype = "solid", color = "black" , size = .2) + # Línea de referencia en OR = 1
+  annotate("text", x = 1, y = -1, label = "Just as likely", vjust = 1.5, hjust = 0.5, color = "grey50") +
+  annotate("text", x = 2, y = -1, label = "2x as likely", vjust = 1.5, hjust = 0.5, color = "grey50") +
+  annotate("text", x = 3, y = -1, label = "3x as likely", vjust = 1.5, hjust = 0.5, color = "grey50") +
+  scale_color_manual(name = '', values = c('black', 'black')) + # Unificar colores de leyenda
+  xlab('Odds Ratio (log scale)') + # Etiqueta del eje x
+  ylab('') + # Eliminar etiqueta del eje y para una apariencia más limpia
+  ggtitle('Odds Ratios - Model 1') + # Título del gráfico
+  theme_minimal() +
+  theme(panel.background = element_rect(fill = 'white'), 
+        plot.title = element_text(size = 10, colour = 'black', face = 'bold', hjust = 0.5), 
+        axis.text = element_text(size = 8), 
+        legend.background = element_blank(), 
+        legend.key = element_blank(), 
+        legend.title = element_text(face = 'bold', size = 8), 
+        legend.text = element_text(size = 8),
+        panel.grid = element_blank())
+
+
+
+```
+
+# Individual evalation of models
+
+```{r}
+
+# GLMNET regularization evaluation
+confusion_glmnet <- confusionMatrix(as.factor(pred_glmnet_classes), as.factor(ytest))
+roc_glmnet <- roc(as.numeric(ytest), as.numeric(pred_glmnet))
+auc_glmnet <- auc(roc_glmnet)
+f1_glmnet <- F1_Score(ytest, pred_glmnet_classes)
+
+
+# Ranger evaluation
+confusion_ranger <- confusionMatrix(as.factor(pred_ranger_classes), as.factor(ytest))
+roc_ranger <- roc(as.numeric(ytest), as.numeric(pred_ranger))
+auc_ranger <- auc(roc_ranger)
+f1_ranger <- F1_Score(ytest, pred_ranger_classes)
+
+
+# XGBoost evaluation
+confusion_xgboost <- confusionMatrix(as.factor(pred_xgboost_classes), as.factor(ytest))
+roc_xgboost <- roc(as.numeric(ytest), as.numeric(pred_xgboost))
+auc_xgboost <- auc(roc_xgboost)
+f1_xgboost <- F1_Score(ytest, pred_xgboost_classes)
+
+# Print results
+print(paste("GLM AUC:", auc_glmnet))
+print(paste("Ranger AUC:", auc_ranger))
+print(paste("XGBoost AUC:", auc_xgboost))
+
+print(paste("GLM F1 Score:", f1_glmnet))
+print(paste("Ranger F1 Score:", f1_ranger))
+print(paste("XGBoost F1 Score:", f1_xgboost))
+
+```
+
+# Feature importance of Ranger model
+
+```{r}
+importance_ranger_df <- as.data.frame(importance_ranger)
+importance_ranger_df$Feature <- rownames(importance_ranger_df)
+colnames(importance_ranger_df) <- c("Importance", "Feature")
+importance_ranger_df$Importance <- as.numeric(importance_ranger_df$Importance)
+
+# Plot
+ranger_importance <- (ggplot(importance_ranger_df, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "#415a77") +
+  coord_flip() +
+  labs(title = "Feature Importance (Ranger)", x = "Feature", y = "Importance"))
+
+``` 
+
+# McFadden's R²
+
+```{r}
+# Exclude FAC_ELE from the predictors in the training set
+xtrain <- as.matrix(train_data %>% select(-care))
+ytrain <- train_data$care
+w_train <- train_data$fac_ele
+
+# Exclude FAC_ELE from the predictors in the test set
+xtest <- as.matrix(test_data %>% select(- care))
+ytest <- test_data$care
+w_test <- test_data$fac_ele
+# Adjust the glmnet model using the training set
+cv_glmnet <- cv.glmnet(xtrain, ytrain, alpha = 1, family = "binomial", weights = w_train)
+model_glmnet <- glmnet(xtrain, ytrain, alpha = 1, lambda = cv_glmnet$lambda.min, family = "binomial", weights = w_train)
+# Estimate the log-likelihood of the null model
+model_null <- glm(care ~ 1, family = binomial, data = train_data, weights = w_train)
+logLik_null <- logLik(model_null)
+
+
+
+# Generate predictions using the glmnet model regularized
+pred_glmnet_train <- predict(model_glmnet, newx = xtrain, type = "response")
+
+# Estimate the log-likelihood of the glmnet model regularized
+logLik_glmnet <- sum(ytrain * log(pred_glmnet_train) + (1 - ytrain) * log(1 - pred_glmnet_train))
+
+# Estimate McFadden R²  
+r2_mcfadden <- 1 - (logLik_glmnet / as.numeric(logLik_null))
+print(paste("McFadden's R²:", r2_mcfadden))
+
+#Predictions of the model regularized in the test set
+pred_glmnet_test <- predict(model_glmnet, newx = xtest, type = "response")
+#Estimate the log-likelihood of the null model in the test set
+model_null_test <- glm(care ~ 1, family = binomial, data = test_data, weights = w_test)
+logLik_null_test <- logLik(model_null_test)
+
+# Estimate the log-likelihood of the glmnet model regularized in the test set
+logLik_glmnet_test <- sum(ytest * log(pred_glmnet_test) + (1 - ytest) * log(1 - pred_glmnet_test))
+
+# Estimate McFadden R² 
+r2_mcfadden_test <- 1 - (logLik_glmnet_test / as.numeric(logLik_null_test))
+print(paste("McFadden's R² (Test):", r2_mcfadden_test))
+```
